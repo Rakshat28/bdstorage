@@ -33,7 +33,7 @@ Imprint is a speed-first, local file deduplication CLI. It scans a target direct
 
 1) **Clone**
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Rakshat28/imprint
 cd imprint
 ```
 
