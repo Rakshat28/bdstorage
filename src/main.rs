@@ -7,6 +7,7 @@ mod vault;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -130,14 +131,41 @@ fn dedupe_groups(groups: &HashMap<Hash, Vec<PathBuf>>, state: &state::State) -> 
         }
         let master = &paths[0];
         let vault_path = vault::ensure_in_vault(hash, master)?;
-        dedupe::replace_with_link(&vault_path, master)?;
+        if let Some(link_type) = dedupe::replace_with_link(&vault_path, master)? {
+            let name = display_name(master);
+            match link_type {
+                dedupe::LinkType::Reflink => {
+                    println!("{} {}", "[REFLINK ]".bold().green(), name);
+                }
+                dedupe::LinkType::HardLink => {
+                    println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                }
+            }
+        }
 
         for path in paths.iter().skip(1) {
-            dedupe::replace_with_link(&vault_path, path)?;
+            if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
+                let name = display_name(path);
+                match link_type {
+                    dedupe::LinkType::Reflink => {
+                        println!("{} {}", "[REFLINK ]".bold().green(), name);
+                    }
+                    dedupe::LinkType::HardLink => {
+                        println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                    }
+                }
+            }
         }
         state.set_cas_refcount(hash, paths.len() as u64)?;
     }
     Ok(())
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn file_modified(path: &Path) -> Result<u64> {

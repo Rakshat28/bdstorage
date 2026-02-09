@@ -8,6 +8,7 @@ anyhow = "1"
 blake3 = "1"
 bincode = "1"
 clap = { version = "4", features = ["derive"] }
+colored = "2"
 crossbeam = "0.8"
 indicatif = "0.17"
 jwalk = "0.8"
