@@ -100,3 +100,11 @@ To remove the DB and vault:
 rm -f ~/.imprint/state.redb
 rm -rf ~/.imprint/store/
 ```
+
+
+## Safety Guarantees
+
+- Original data is never deleted until a verified copy exists in the vault.
+- Hash verification is always performed before linking.
+- If the process is interrupted, partially processed files are left untouched.
+- Reflinks/hardlinks are only created after successful vault storage.
