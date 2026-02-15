@@ -14,6 +14,13 @@ pub fn group_by_size(root: &Path) -> Result<HashMap<u64, Vec<PathBuf>>> {
         if !entry.file_type().is_file() {
             continue;
         }
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".imprint_tmp")
+        {
+            continue;
+        }
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(_) => continue,
