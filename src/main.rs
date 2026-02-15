@@ -11,6 +11,7 @@ use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::types::{FileMetadata, Hash};
@@ -68,12 +69,19 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
         sparse_bar.inc(1);
         let sparse_hashes: Vec<(Hash, PathBuf)> = group
             .par_iter()
-            .map(|path| -> Result<(Hash, PathBuf)> {
-                let size = std::fs::metadata(path)?.len();
-                let hash = hasher::sparse_hash(path, size)?;
-                Ok((hash, path.clone()))
+            .map(|path| -> Result<Option<(Hash, PathBuf)>> {
+                let meta = std::fs::metadata(path)?;
+                let inode = meta.ino();
+                if state.is_inode_vaulted(inode)? {
+                    return Ok(None);
+                }
+                let hash = hasher::sparse_hash(path, meta.len())?;
+                Ok(Some((hash, path.clone())))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
 
         let mut buckets: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
         for (hash, path) in sparse_hashes {
@@ -132,26 +140,38 @@ fn dedupe_groups(groups: &HashMap<Hash, Vec<PathBuf>>, state: &state::State) -> 
         let master = &paths[0];
         let vault_path = vault::ensure_in_vault(hash, master)?;
         if let Some(link_type) = dedupe::replace_with_link(&vault_path, master)? {
-            let name = display_name(master);
-            match link_type {
-                dedupe::LinkType::Reflink => {
-                    println!("{} {}", "[REFLINK ]".bold().green(), name);
-                }
-                dedupe::LinkType::HardLink => {
-                    println!("{} {}", "[HARDLINK]".bold().yellow(), name);
-                }
+            if link_type == dedupe::LinkType::HardLink {
+                let inode = std::fs::metadata(master)?.ino();
+                state.mark_inode_vaulted(inode)?;
             }
-        }
-
-        for path in paths.iter().skip(1) {
-            if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
-                let name = display_name(path);
+            if !is_temp_file(master) {
+                let name = display_name(master);
                 match link_type {
                     dedupe::LinkType::Reflink => {
                         println!("{} {}", "[REFLINK ]".bold().green(), name);
                     }
                     dedupe::LinkType::HardLink => {
                         println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                    }
+                }
+            }
+        }
+
+        for path in paths.iter().skip(1) {
+            if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
+                if link_type == dedupe::LinkType::HardLink {
+                    let inode = std::fs::metadata(path)?.ino();
+                    state.mark_inode_vaulted(inode)?;
+                }
+                if !is_temp_file(path) {
+                    let name = display_name(path);
+                    match link_type {
+                        dedupe::LinkType::Reflink => {
+                            println!("{} {}", "[REFLINK ]".bold().green(), name);
+                        }
+                        dedupe::LinkType::HardLink => {
+                            println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                        }
                     }
                 }
             }
@@ -166,6 +186,13 @@ fn display_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .map(|name| name.to_string())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn is_temp_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".imprint_tmp"))
+        .unwrap_or(false)
 }
 
 fn file_modified(path: &Path) -> Result<u64> {

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 const FILE_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("file_index");
 const CAS_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cas_index");
+const VAULTED_INODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaulted_inodes");
 
 pub struct State {
     db: Database,
@@ -18,6 +19,13 @@ impl State {
                 .with_context(|| format!("create state directory {:?}", parent))?;
         }
         let db = Database::create(&db_path).with_context(|| "open redb database")?;
+        let txn = db.begin_write().with_context(|| "begin write transaction")?;
+        {
+            let _ = txn.open_table(FILE_INDEX)?;
+            let _ = txn.open_table(CAS_INDEX)?;
+            let _ = txn.open_table(VAULTED_INODES)?;
+        }
+        txn.commit().with_context(|| "commit table initialization")?;
         Ok(Self { db })
     }
 
@@ -42,6 +50,29 @@ impl State {
             table.insert(key.as_slice(), value.as_slice())?;
         }
         txn.commit().with_context(|| "commit cas index write")?;
+        Ok(())
+    }
+
+    pub fn is_inode_vaulted(&self, inode: u64) -> Result<bool> {
+        let key = inode.to_le_bytes();
+        let txn = self.db.begin_read().with_context(|| "begin read transaction")?;
+        let table = match txn.open_table(VAULTED_INODES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(table.get(key.as_slice())?.is_some())
+    }
+
+    pub fn mark_inode_vaulted(&self, inode: u64) -> Result<()> {
+        let key = inode.to_le_bytes();
+        let value = 1u8;
+        let txn = self.db.begin_write().with_context(|| "begin write transaction")?;
+        {
+            let mut table = txn.open_table(VAULTED_INODES)?;
+            table.insert(key.as_slice(), std::slice::from_ref(&value))?;
+        }
+        txn.commit().with_context(|| "commit vaulted inode write")?;
         Ok(())
     }
 }
