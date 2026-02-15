@@ -26,7 +26,14 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Scan { path: PathBuf },
-    Dedupe { path: PathBuf },
+    Dedupe {
+        path: PathBuf,
+        #[arg(
+            long,
+            help = "Perform byte-for-byte verification before linking to guarantee 100% collision safety."
+        )]
+        paranoid: bool,
+    },
 }
 
 fn main() {
@@ -45,9 +52,9 @@ fn run() -> Result<()> {
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
-        Commands::Dedupe { path } => {
+        Commands::Dedupe { path, paranoid } => {
             let groups = scan_pipeline(&path, &state)?;
-            dedupe_groups(&groups, &state)?;
+            dedupe_groups(&groups, &state, paranoid)?;
             print_summary("dedupe", &groups);
         }
     }
@@ -132,13 +139,34 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     Ok(full_groups)
 }
 
-fn dedupe_groups(groups: &HashMap<Hash, Vec<PathBuf>>, state: &state::State) -> Result<()> {
+fn dedupe_groups(
+    groups: &HashMap<Hash, Vec<PathBuf>>,
+    state: &state::State,
+    paranoid: bool,
+) -> Result<()> {
     for (hash, paths) in groups {
         if paths.len() < 2 {
             continue;
         }
         let master = &paths[0];
         let vault_path = vault::ensure_in_vault(hash, master)?;
+        let mut master_verified = false;
+        if paranoid && master.exists() {
+            match dedupe::compare_files(&vault_path, master) {
+                Ok(true) => master_verified = true,
+                Ok(false) => {
+                    eprintln!(
+                        "HASH COLLISION OR BIT ROT DETECTED: {}",
+                        master.display()
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    eprintln!("VERIFY FAILED (skipping): {}: {err}", master.display());
+                    continue;
+                }
+            }
+        }
         if let Some(link_type) = dedupe::replace_with_link(&vault_path, master)? {
             if link_type == dedupe::LinkType::HardLink {
                 let inode = std::fs::metadata(master)?.ino();
@@ -148,16 +176,51 @@ fn dedupe_groups(groups: &HashMap<Hash, Vec<PathBuf>>, state: &state::State) -> 
                 let name = display_name(master);
                 match link_type {
                     dedupe::LinkType::Reflink => {
-                        println!("{} {}", "[REFLINK ]".bold().green(), name);
+                        if paranoid && master_verified {
+                            println!(
+                                "{} {} {}",
+                                "[REFLINK ]".bold().green(),
+                                "[VERIFIED]".bold().blue(),
+                                name
+                            );
+                        } else {
+                            println!("{} {}", "[REFLINK ]".bold().green(), name);
+                        }
                     }
                     dedupe::LinkType::HardLink => {
-                        println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                        if paranoid && master_verified {
+                            println!(
+                                "{} {} {}",
+                                "[HARDLINK]".bold().yellow(),
+                                "[VERIFIED]".bold().blue(),
+                                name
+                            );
+                        } else {
+                            println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                        }
                     }
                 }
             }
         }
 
         for path in paths.iter().skip(1) {
+            let mut verified = false;
+            if paranoid {
+                match dedupe::compare_files(&vault_path, path) {
+                    Ok(true) => verified = true,
+                    Ok(false) => {
+                        eprintln!(
+                            "HASH COLLISION OR BIT ROT DETECTED: {}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        eprintln!("VERIFY FAILED (skipping): {}: {err}", path.display());
+                        continue;
+                    }
+                }
+            }
             if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
                 if link_type == dedupe::LinkType::HardLink {
                     let inode = std::fs::metadata(path)?.ino();
@@ -167,10 +230,28 @@ fn dedupe_groups(groups: &HashMap<Hash, Vec<PathBuf>>, state: &state::State) -> 
                     let name = display_name(path);
                     match link_type {
                         dedupe::LinkType::Reflink => {
-                            println!("{} {}", "[REFLINK ]".bold().green(), name);
+                            if paranoid && verified {
+                                println!(
+                                    "{} {} {}",
+                                    "[REFLINK ]".bold().green(),
+                                    "[VERIFIED]".bold().blue(),
+                                    name
+                                );
+                            } else {
+                                println!("{} {}", "[REFLINK ]".bold().green(), name);
+                            }
                         }
                         dedupe::LinkType::HardLink => {
-                            println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                            if paranoid && verified {
+                                println!(
+                                    "{} {} {}",
+                                    "[HARDLINK]".bold().yellow(),
+                                    "[VERIFIED]".bold().blue(),
+                                    name
+                                );
+                            } else {
+                                println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                            }
                         }
                     }
                 }
