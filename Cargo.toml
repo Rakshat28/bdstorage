@@ -23,8 +23,12 @@ colored = "2"
 crossbeam = "0.8"
 indicatif = "0.17"
 jwalk = "0.8"
+nix = { version = "0.27", features = ["ioctl"], optional = true }
 rayon = "1"
 redb = "2"
 reflink = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.27", features = ["ioctl"] }
