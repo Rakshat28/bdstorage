@@ -1,6 +1,6 @@
-# Imprint Deduplication Engine
+# BDSTORAGE Deduplication Engine
 
-Imprint is a speed-first, local file deduplication CLI. It scans a target directory, detects identical files using a tiered hashing pipeline, and replaces duplicates with reflinks (primary) or hard links (fallback). Identical content is stored in a content-addressable storage (CAS) vault backed by a small embedded database.
+bdstorage is a speed-first, local file deduplication CLI. It scans a target directory, detects identical files using a tiered hashing pipeline, and replaces duplicates with reflinks (primary) or hard links (fallback). Identical content is stored in a content-addressable storage (CAS) vault backed by a small embedded database.
 
 ---
 
@@ -33,8 +33,8 @@ Imprint is a speed-first, local file deduplication CLI. It scans a target direct
 
 1) **Clone**
 ```bash
-git clone https://github.com/Rakshat28/imprint
-cd imprint
+git clone https://github.com/Rakshat28/bdstorage
+cd bdstorage
 ```
 
 2) **Install Rust**
@@ -70,8 +70,8 @@ cargo run -- dedupe /path/to/dir
 
 ## Data Locations
 
-- **State DB**: `~/.imprint/state.redb`
-- **CAS Vault**: `~/.imprint/store/`
+- **State DB**: `~/.bdstorage/state.redb`
+- **CAS Vault**: `~/.bdstorage/store/`
 
 The DB and vault are created automatically on first run.
 
@@ -97,8 +97,8 @@ The DB and vault are created automatically on first run.
 To remove the DB and vault:
 
 ```bash
-rm -f ~/.imprint/state.redb
-rm -rf ~/.imprint/store/
+rm -f ~/.bdstorage/state.redb
+rm -rf ~/.bdstorage/store/
 ```
 
 
