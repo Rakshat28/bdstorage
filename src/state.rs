@@ -7,8 +7,9 @@ const FILE_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("file_ind
 const CAS_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cas_index");
 const VAULTED_INODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaulted_inodes");
 
+#[derive(Clone)]
 pub struct State {
-    db: Database,
+    db: std::sync::Arc<Database>,
 }
 
 impl State {
@@ -26,7 +27,9 @@ impl State {
             let _ = txn.open_table(VAULTED_INODES)?;
         }
         txn.commit().with_context(|| "commit table initialization")?;
-        Ok(Self { db })
+        Ok(Self {
+            db: std::sync::Arc::new(db),
+        })
     }
 
     pub fn upsert_file(&self, path: &Path, metadata: &FileMetadata) -> Result<()> {

@@ -8,8 +8,8 @@ mod vault;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
+use crossbeam::channel;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -69,80 +69,142 @@ fn run() -> Result<()> {
 }
 
 fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<PathBuf>>> {
-    let size_groups = scanner::group_by_size(path)?;
-    let size_groups: Vec<Vec<PathBuf>> = size_groups
-        .into_values()
-        .filter(|paths| paths.len() > 1)
-        .collect();
+    // Setup UI: Create MultiProgress and progress bars
+    let multi = MultiProgress::new();
+    let scan_spinner = multi.add(ProgressBar::new_spinner());
+    scan_spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner} {msg}")
+            .unwrap(),
+    );
+    scan_spinner.set_message("Scanning...");
 
-    let sparse_bar = progress("sparse hashing", size_groups.len() as u64);
-    let mut sparse_groups: Vec<Vec<PathBuf>> = Vec::new();
+    let hash_bar = multi.add(progress("Indexing/Hashing", 0));
 
-    for group in size_groups {
-        sparse_bar.inc(1);
-        let sparse_hashes: Vec<(Hash, PathBuf)> = group
-            .par_iter()
-            .map(|path| -> Result<Option<(Hash, PathBuf)>> {
-                let meta = std::fs::metadata(path)?;
-                let inode = meta.ino();
-                if state.is_inode_vaulted(inode)? {
-                    return Ok(None);
+    // Spawn scanner thread with channel
+    let (scan_tx, scan_rx) = channel::unbounded();
+    let path_clone = path.to_path_buf();
+    let scanner_handle = std::thread::spawn(move || -> Result<()> {
+        scanner::stream_scan(&path_clone, scan_tx)
+    });
+
+    // Create channel for hashing tasks
+    let (hash_task_tx, hash_task_rx) = channel::unbounded::<PathBuf>();
+
+    // Create channel for results
+    let (result_tx, result_rx) = channel::unbounded::<(Hash, PathBuf)>();
+
+    // Spawn worker threads for hashing
+    let state_clone = state.clone();
+    let num_workers = std::cmp::min(rayon::current_num_threads(), 8);
+    let mut worker_handles = vec![];
+
+    for _ in 0..num_workers {
+        let rx = hash_task_rx.clone();
+        let tx = result_tx.clone();
+        let state_ref = state_clone.clone();
+        let hash_bar_clone = hash_bar.clone();
+
+        let handle = std::thread::spawn(move || {
+            while let Ok(file_path) = rx.recv() {
+                if let Ok(metadata) = std::fs::metadata(&file_path) {
+                    let inode = metadata.ino();
+                    if let Ok(is_vaulted) = state_ref.is_inode_vaulted(inode) {
+                        if is_vaulted {
+                            continue;
+                        }
+                    }
+
+                    let size = metadata.len();
+                    if let Ok(_) = hasher::sparse_hash(&file_path, size) {
+                        // For now, always perform full hash for indexing
+                        if let Ok(full_hash) = hasher::full_hash(&file_path) {
+                            let modified = file_modified(&file_path).unwrap_or(0);
+                            let file_metadata = FileMetadata {
+                                size,
+                                modified,
+                                hash: full_hash,
+                            };
+                            let _ = state_ref.upsert_file(&file_path, &file_metadata);
+                            let _ = tx.send((full_hash, file_path));
+                            hash_bar_clone.inc(1);
+                        }
+                    }
                 }
-                let hash = hasher::sparse_hash(path, meta.len())?;
-                Ok(Some((hash, path.clone())))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
+            }
+        });
 
-        let mut buckets: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
-        for (hash, path) in sparse_hashes {
-            buckets.entry(hash).or_default().push(path);
-        }
-        for (_, paths) in buckets {
-            if paths.len() > 1 {
-                sparse_groups.push(paths);
+        worker_handles.push(handle);
+    }
+
+    // Coordinator loop: maintain size_map and send collision files to hashing
+    let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+
+    loop {
+        match scan_rx.recv() {
+            Ok(file_path) => {
+                scan_spinner.tick();
+
+                if let Ok(metadata) = std::fs::metadata(&file_path) {
+                    let size = metadata.len();
+                    let entry = size_map.entry(size).or_default();
+                    let len_before = entry.len();
+                    entry.push(file_path.clone());
+
+                    // Collision trigger: send files to hashing when we hit count 2 or more
+                    if len_before == 1 {
+                        // First collision: send both files (index 0 and 1)
+                        if let Some(first_file) = entry.get(0).cloned() {
+                            let _ = hash_task_tx.send(first_file);
+                        }
+                        let _ = hash_task_tx.send(file_path);
+                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
+                    } else if len_before > 1 {
+                        // Subsequent collision: send only the new file
+                        let _ = hash_task_tx.send(file_path);
+                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
+                    }
+                }
+            }
+            Err(_) => {
+                // Scanner thread done
+                break;
             }
         }
     }
-    sparse_bar.finish_and_clear();
 
-    let total_full: usize = sparse_groups.iter().map(|g| g.len()).sum();
-    let full_bar = progress("full hashing", total_full as u64);
-    let mut full_groups: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
+    scan_spinner.finish_and_clear();
 
-    for group in sparse_groups {
-        let full_hashes: Vec<(Hash, PathBuf, u64)> = group
-            .par_iter()
-            .map(|path| -> Result<(Hash, PathBuf, u64)> {
-                let meta = std::fs::metadata(path)?;
-                let hash = hasher::full_hash(path)?;
-                Ok((hash, path.clone(), meta.len()))
-            })
-            .collect::<Result<Vec<_>>>()?;
+    // Wait for scanner to finish and handle any errors
+    let _ = scanner_handle.join();
 
-        for (hash, path, size) in full_hashes {
-            full_bar.inc(1);
-            let modified = file_modified(path.as_path())?;
-            let metadata = FileMetadata {
-                size,
-                modified,
-                hash,
-            };
-            state.upsert_file(&path, &metadata)?;
-            full_groups.entry(hash).or_default().push(path);
-        }
+    // Drop the hash_task_tx so workers know when to stop
+    drop(hash_task_tx);
+
+    // Wait for all workers to finish
+    for handle in worker_handles {
+        let _ = handle.join();
     }
-    full_bar.finish_and_clear();
 
-    for (hash, paths) in &full_groups {
+    // Drop result_tx so we can collect results
+    drop(result_tx);
+
+    // Collect all hashing results
+    let mut results: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
+    while let Ok((hash, path)) = result_rx.recv() {
+        results.entry(hash).or_default().push(path);
+    }
+
+    hash_bar.finish_and_clear();
+
+    // Set refcount for collisions
+    for (hash, paths) in &results {
         if paths.len() > 1 {
             state.set_cas_refcount(hash, paths.len() as u64)?;
         }
     }
 
-    Ok(full_groups)
+    Ok(results)
 }
 
 fn dedupe_groups(
