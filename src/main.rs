@@ -33,6 +33,12 @@ enum Commands {
             help = "Perform byte-for-byte verification before linking to guarantee 100% collision safety."
         )]
         paranoid: bool,
+        #[arg(
+            long,
+            short = 'n',
+            help = "Simulate operations without modifying the filesystem or database."
+        )]
+        dry_run: bool,
     },
 }
 
@@ -52,9 +58,9 @@ fn run() -> Result<()> {
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
-        Commands::Dedupe { path, paranoid } => {
+        Commands::Dedupe { path, paranoid, dry_run } => {
             let groups = scan_pipeline(&path, &state)?;
-            dedupe_groups(&groups, &state, paranoid)?;
+            dedupe_groups(&groups, &state, paranoid, dry_run)?;
             print_summary("dedupe", &groups);
         }
     }
@@ -143,15 +149,31 @@ fn dedupe_groups(
     groups: &HashMap<Hash, Vec<PathBuf>>,
     state: &state::State,
     paranoid: bool,
+    dry_run: bool,
 ) -> Result<()> {
     for (hash, paths) in groups {
         if paths.len() < 2 {
             continue;
         }
         let master = &paths[0];
-        let vault_path = vault::ensure_in_vault(hash, master)?;
+        
+        // Handle master file: either move to vault or calculate theoretical path
+        let vault_path = if dry_run {
+            let theoretical_path = vault::shard_path(hash)?;
+            let name = display_name(master);
+            println!(
+                "{} Would move master: {} -> {}",
+                "[DRY RUN]".yellow().dimmed(),
+                name,
+                theoretical_path.display()
+            );
+            theoretical_path
+        } else {
+            vault::ensure_in_vault(hash, master)?
+        };
+        
         let mut master_verified = false;
-        if paranoid && master.exists() {
+        if paranoid && !dry_run && master.exists() {
             match dedupe::compare_files(&vault_path, master) {
                 Ok(true) => master_verified = true,
                 Ok(false) => {
@@ -167,45 +189,66 @@ fn dedupe_groups(
                 }
             }
         }
-        if let Some(link_type) = dedupe::replace_with_link(&vault_path, master)? {
-            if link_type == dedupe::LinkType::HardLink {
-                let inode = std::fs::metadata(master)?.ino();
-                state.mark_inode_vaulted(inode)?;
-            }
-            if !is_temp_file(master) {
-                let name = display_name(master);
-                match link_type {
-                    dedupe::LinkType::Reflink => {
-                        if paranoid && master_verified {
-                            println!(
-                                "{} {} {}",
-                                "[REFLINK ]".bold().green(),
-                                "[VERIFIED]".bold().blue(),
-                                name
-                            );
-                        } else {
-                            println!("{} {}", "[REFLINK ]".bold().green(), name);
+        
+        if paranoid && dry_run {
+            println!(
+                "{} Skipping paranoid verification (master not in vault)",
+                "[DRY RUN]".yellow().dimmed()
+            );
+        }
+        
+        // Handle master file replacement (or dry-run simulation)
+        if !dry_run {
+            if let Some(link_type) = dedupe::replace_with_link(&vault_path, master)? {
+                if link_type == dedupe::LinkType::HardLink {
+                    let inode = std::fs::metadata(master)?.ino();
+                    state.mark_inode_vaulted(inode)?;
+                }
+                if !is_temp_file(master) {
+                    let name = display_name(master);
+                    match link_type {
+                        dedupe::LinkType::Reflink => {
+                            if paranoid && master_verified {
+                                println!(
+                                    "{} {} {}",
+                                    "[REFLINK ]".bold().green(),
+                                    "[VERIFIED]".bold().blue(),
+                                    name
+                                );
+                            } else {
+                                println!("{} {}", "[REFLINK ]".bold().green(), name);
+                            }
                         }
-                    }
-                    dedupe::LinkType::HardLink => {
-                        if paranoid && master_verified {
-                            println!(
-                                "{} {} {}",
-                                "[HARDLINK]".bold().yellow(),
-                                "[VERIFIED]".bold().blue(),
-                                name
-                            );
-                        } else {
-                            println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                        dedupe::LinkType::HardLink => {
+                            if paranoid && master_verified {
+                                println!(
+                                    "{} {} {}",
+                                    "[HARDLINK]".bold().yellow(),
+                                    "[VERIFIED]".bold().blue(),
+                                    name
+                                );
+                            } else {
+                                println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                            }
                         }
                     }
                 }
             }
+        } else {
+            // Dry-run: simulate linking
+            let name = display_name(master);
+            println!(
+                "{} Would dedupe: {} -> {} (reflink/hardlink)",
+                "[DRY RUN]".yellow().dimmed(),
+                name,
+                vault_path.display()
+            );
         }
 
+        // Handle duplicates
         for path in paths.iter().skip(1) {
             let mut verified = false;
-            if paranoid {
+            if paranoid && !dry_run {
                 match dedupe::compare_files(&vault_path, path) {
                     Ok(true) => verified = true,
                     Ok(false) => {
@@ -221,43 +264,66 @@ fn dedupe_groups(
                     }
                 }
             }
-            if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
-                if link_type == dedupe::LinkType::HardLink {
-                    let inode = std::fs::metadata(path)?.ino();
-                    state.mark_inode_vaulted(inode)?;
-                }
-                if !is_temp_file(path) {
-                    let name = display_name(path);
-                    match link_type {
-                        dedupe::LinkType::Reflink => {
-                            if paranoid && verified {
-                                println!(
-                                    "{} {} {}",
-                                    "[REFLINK ]".bold().green(),
-                                    "[VERIFIED]".bold().blue(),
-                                    name
-                                );
-                            } else {
-                                println!("{} {}", "[REFLINK ]".bold().green(), name);
+            
+            if !dry_run {
+                if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
+                    if link_type == dedupe::LinkType::HardLink {
+                        let inode = std::fs::metadata(path)?.ino();
+                        state.mark_inode_vaulted(inode)?;
+                    }
+                    if !is_temp_file(path) {
+                        let name = display_name(path);
+                        match link_type {
+                            dedupe::LinkType::Reflink => {
+                                if paranoid && verified {
+                                    println!(
+                                        "{} {} {}",
+                                        "[REFLINK ]".bold().green(),
+                                        "[VERIFIED]".bold().blue(),
+                                        name
+                                    );
+                                } else {
+                                    println!("{} {}", "[REFLINK ]".bold().green(), name);
+                                }
                             }
-                        }
-                        dedupe::LinkType::HardLink => {
-                            if paranoid && verified {
-                                println!(
-                                    "{} {} {}",
-                                    "[HARDLINK]".bold().yellow(),
-                                    "[VERIFIED]".bold().blue(),
-                                    name
-                                );
-                            } else {
-                                println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                            dedupe::LinkType::HardLink => {
+                                if paranoid && verified {
+                                    println!(
+                                        "{} {} {}",
+                                        "[HARDLINK]".bold().yellow(),
+                                        "[VERIFIED]".bold().blue(),
+                                        name
+                                    );
+                                } else {
+                                    println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                                }
                             }
                         }
                     }
                 }
+            } else {
+                // Dry-run: simulate linking
+                let name = display_name(path);
+                println!(
+                    "{} Would dedupe: {} -> {} (reflink/hardlink)",
+                    "[DRY RUN]".yellow().dimmed(),
+                    name,
+                    vault_path.display()
+                );
             }
         }
-        state.set_cas_refcount(hash, paths.len() as u64)?;
+        
+        // Handle database state updates (or dry-run simulation)
+        if !dry_run {
+            state.set_cas_refcount(hash, paths.len() as u64)?;
+        } else {
+            let hex = crate::types::hash_to_hex(hash);
+            println!(
+                "{} Would update DB state for hash {}",
+                "[DRY RUN]".yellow().dimmed(),
+                hex
+            );
+        }
     }
     Ok(())
 }
