@@ -1,0 +1,1122 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  dedupe.rs
+  hasher.rs
+  main.rs
+  scanner.rs
+  state.rs
+  types.rs
+  vault.rs
+.gitignore
+Cargo.toml
+LICENSE
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/types.rs">
+use serde::{Deserialize, Serialize};
+
+pub type Hash = [u8; 32];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMetadata {
+    pub size: u64,
+    pub modified: u64,
+    pub hash: Hash,
+}
+
+pub fn hash_to_hex(hash: &Hash) -> String {
+    blake3::Hash::from_bytes(*hash).to_hex().to_string()
+}
+</file>
+
+<file path="src/vault.rs">
+use crate::types::{hash_to_hex, Hash};
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+pub fn vault_root() -> Result<PathBuf> {
+    let home = std::env::var("HOME").with_context(|| "HOME not set")?;
+    Ok(PathBuf::from(home).join(".imprint").join("store"))
+}
+
+pub fn shard_path(hash: &Hash) -> Result<PathBuf> {
+    let hex = hash_to_hex(hash);
+    let shard_a = &hex[0..2];
+    let shard_b = &hex[2..4];
+    let root = vault_root()?;
+    Ok(root.join(shard_a).join(shard_b).join(hex))
+}
+
+pub fn ensure_in_vault(hash: &Hash, src: &Path) -> Result<PathBuf> {
+    let dest = shard_path(hash)?;
+    if dest.exists() {
+        return Ok(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create vault directory {:?}", parent))?;
+    }
+
+    match std::fs::rename(src, &dest) {
+        Ok(_) => Ok(dest),
+        Err(_) => {
+            std::fs::copy(src, &dest).with_context(|| "copy into vault")?;
+            std::fs::remove_file(src).with_context(|| "remove original after copy")?;
+            Ok(dest)
+        }
+    }
+}
+</file>
+
+<file path=".gitignore">
+/target
+</file>
+
+<file path="LICENSE">
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright 2026 Rakshat Pratap Singh
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+</file>
+
+<file path="src/hasher.rs">
+use crate::types::Hash;
+use anyhow::{Context, Result};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+const SPARSE_CHUNK: usize = 4 * 1024;
+const SPARSE_TOTAL: u64 = 12 * 1024;
+const FULL_BUF: usize = 128 * 1024;
+
+pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
+    if size <= SPARSE_TOTAL {
+        return full_hash(path);
+    }
+
+    let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
+    let mut hasher = blake3::Hasher::new();
+
+    let mut buffer = vec![0u8; SPARSE_CHUNK];
+
+    read_at(&mut file, 0, &mut buffer)?;
+    hasher.update(&buffer);
+
+    let mid_target = (size / 2).saturating_sub((SPARSE_CHUNK / 2) as u64);
+    let middle = adjust_offset_for_sparse(&file, mid_target, size);
+    read_at(&mut file, middle, &mut buffer)?;
+    hasher.update(&buffer);
+
+    let end = size.saturating_sub(SPARSE_CHUNK as u64);
+    read_at(&mut file, end, &mut buffer)?;
+    hasher.update(&buffer);
+
+    Ok(hasher.finalize().into())
+}
+
+pub fn full_hash(path: &Path) -> Result<Hash> {
+    let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; FULL_BUF];
+
+    loop {
+        let read = file.read(&mut buffer).with_context(|| "read file")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(hasher.finalize().into())
+}
+
+fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<()> {
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| "seek file")?;
+    file.read_exact(buffer).with_context(|| "read sparse chunk")?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn adjust_offset_for_sparse(file: &File, target: u64, _file_size: u64) -> u64 {
+    use nix::ioctl_readwrite;
+    use std::mem;
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    struct FiemapExtent {
+        fe_logical: u64,
+        fe_physical: u64,
+        fe_length: u64,
+        fe_flags: u32,
+        fe_reserved: u32,
+    }
+
+    #[repr(C)]
+    struct Fiemap {
+        fm_start: u64,
+        fm_length: u64,
+        fm_flags: u32,
+        fm_mapped_extents: u32,
+        fm_extent_count: u32,
+        fm_reserved: u32,
+        fm_extents: [FiemapExtent; 32],
+    }
+
+    ioctl_readwrite!(fiemap, b'f', 11, Fiemap);
+
+    let fd = file.as_raw_fd();
+    let mut fiemap_data: Fiemap = unsafe { mem::zeroed() };
+    fiemap_data.fm_start = target;
+    fiemap_data.fm_length = u64::MAX;
+    fiemap_data.fm_extent_count = 32;
+
+    if unsafe { fiemap(fd, &mut fiemap_data).is_ok() } {
+        let mapped = fiemap_data.fm_mapped_extents as usize;
+        if mapped > 0 {
+            for i in 0..mapped {
+                let extent = &fiemap_data.fm_extents[i];
+                let extent_start = extent.fe_logical;
+                let extent_end = extent_start + extent.fe_length;
+
+                if target >= extent_start && target < extent_end {
+                    return target;
+                }
+                if extent_start > target {
+                    return extent_start;
+                }
+            }
+        }
+    }
+
+    target
+}
+
+#[cfg(not(target_os = "linux"))]
+fn adjust_offset_for_sparse(_file: &File, target: u64, _file_size: u64) -> u64 {
+    target
+}
+</file>
+
+<file path="src/scanner.rs">
+use anyhow::Result;
+use jwalk::WalkDir;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+pub fn group_by_size(root: &Path) -> Result<HashMap<u64, Vec<PathBuf>>> {
+    let mut groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+
+    for entry in WalkDir::new(root).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".imprint_tmp")
+        {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let size = metadata.len();
+        groups
+            .entry(size)
+            .or_default()
+            .push(entry.path().to_path_buf());
+    }
+
+    Ok(groups)
+}
+</file>
+
+<file path="src/state.rs">
+use crate::types::{FileMetadata, Hash};
+use anyhow::{Context, Result};
+use redb::{Database, TableDefinition};
+use std::path::{Path, PathBuf};
+
+const FILE_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("file_index");
+const CAS_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cas_index");
+const VAULTED_INODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaulted_inodes");
+
+pub struct State {
+    db: Database,
+}
+
+impl State {
+    pub fn open_default() -> Result<Self> {
+        let db_path = default_db_path()?;
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create state directory {:?}", parent))?;
+        }
+        let db = Database::create(&db_path).with_context(|| "open redb database")?;
+        let txn = db.begin_write().with_context(|| "begin write transaction")?;
+        {
+            let _ = txn.open_table(FILE_INDEX)?;
+            let _ = txn.open_table(CAS_INDEX)?;
+            let _ = txn.open_table(VAULTED_INODES)?;
+        }
+        txn.commit().with_context(|| "commit table initialization")?;
+        Ok(Self { db })
+    }
+
+    pub fn upsert_file(&self, path: &Path, metadata: &FileMetadata) -> Result<()> {
+        let key = path.to_string_lossy().as_bytes().to_vec();
+        let value = bincode::serialize(metadata).with_context(|| "serialize file metadata")?;
+        let txn = self.db.begin_write().with_context(|| "begin write transaction")?;
+        {
+            let mut table = txn.open_table(FILE_INDEX)?;
+            table.insert(key.as_slice(), value.as_slice())?;
+        }
+        txn.commit().with_context(|| "commit file index write")?;
+        Ok(())
+    }
+
+    pub fn set_cas_refcount(&self, hash: &Hash, count: u64) -> Result<()> {
+        let key = hash.to_vec();
+        let value = count.to_le_bytes().to_vec();
+        let txn = self.db.begin_write().with_context(|| "begin write transaction")?;
+        {
+            let mut table = txn.open_table(CAS_INDEX)?;
+            table.insert(key.as_slice(), value.as_slice())?;
+        }
+        txn.commit().with_context(|| "commit cas index write")?;
+        Ok(())
+    }
+
+    pub fn is_inode_vaulted(&self, inode: u64) -> Result<bool> {
+        let key = inode.to_le_bytes();
+        let txn = self.db.begin_read().with_context(|| "begin read transaction")?;
+        let table = match txn.open_table(VAULTED_INODES) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(table.get(key.as_slice())?.is_some())
+    }
+
+    pub fn mark_inode_vaulted(&self, inode: u64) -> Result<()> {
+        let key = inode.to_le_bytes();
+        let value = 1u8;
+        let txn = self.db.begin_write().with_context(|| "begin write transaction")?;
+        {
+            let mut table = txn.open_table(VAULTED_INODES)?;
+            table.insert(key.as_slice(), std::slice::from_ref(&value))?;
+        }
+        txn.commit().with_context(|| "commit vaulted inode write")?;
+        Ok(())
+    }
+}
+
+pub fn default_db_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME").with_context(|| "HOME not set")?;
+    Ok(PathBuf::from(home).join(".imprint").join("state.redb"))
+}
+</file>
+
+<file path="src/dedupe.rs">
+use anyhow::{Context, Result};
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkType {
+    Reflink,
+    HardLink,
+}
+
+struct TempCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.path.exists() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+pub fn replace_with_link(master: &Path, target: &Path) -> Result<Option<LinkType>> {
+    if master == target {
+        return Ok(None);
+    }
+
+    let mut temp = target.to_path_buf();
+    temp.set_extension("imprint_tmp");
+    if temp.exists() {
+        std::fs::remove_file(&temp).with_context(|| "remove existing temp file")?;
+    }
+
+    let mut cleanup = TempCleanup::new(temp.clone());
+
+    match reflink::reflink(master, &temp) {
+        Ok(_) => {
+            std::fs::rename(&temp, target).with_context(|| "replace target with reflink")?;
+            cleanup.disarm();
+            Ok(Some(LinkType::Reflink))
+        }
+        Err(_) => {
+            if temp.exists() {
+                let _ = std::fs::remove_file(&temp);
+            }
+            std::fs::hard_link(master, &temp).with_context(|| "create hard link")?;
+            std::fs::rename(&temp, target).with_context(|| "replace target with hard link")?;
+            cleanup.disarm();
+            Ok(Some(LinkType::HardLink))
+        }
+    }
+}
+
+pub fn compare_files(path1: &Path, path2: &Path) -> Result<bool> {
+    const BUFFER_SIZE: usize = 128 * 1024;
+
+    let file1 = File::open(path1).with_context(|| "open file for compare (path1)")?;
+    let file2 = File::open(path2).with_context(|| "open file for compare (path2)")?;
+
+    let mut reader1 = BufReader::with_capacity(BUFFER_SIZE, file1);
+    let mut reader2 = BufReader::with_capacity(BUFFER_SIZE, file2);
+
+    let mut buf1 = vec![0u8; BUFFER_SIZE];
+    let mut buf2 = vec![0u8; BUFFER_SIZE];
+
+    loop {
+        let read1 = reader1.read(&mut buf1)?;
+        let read2 = reader2.read(&mut buf2)?;
+
+        if read1 != read2 {
+            return Ok(false);
+        }
+        if read1 == 0 {
+            return Ok(true);
+        }
+        if buf1[..read1] != buf2[..read2] {
+            return Ok(false);
+        }
+    }
+}
+</file>
+
+<file path="src/main.rs">
+mod dedupe;
+mod hasher;
+mod scanner;
+mod state;
+mod types;
+mod vault;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use colored::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+
+use crate::types::{FileMetadata, Hash};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Imprint - speed-first deduplication engine")]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Scan { path: PathBuf },
+    Dedupe {
+        path: PathBuf,
+        #[arg(
+            long,
+            help = "Perform byte-for-byte verification before linking to guarantee 100% collision safety."
+        )]
+        paranoid: bool,
+    },
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("{err:?}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let args = Args::parse();
+    let state = state::State::open_default()?;
+
+    match args.command {
+        Commands::Scan { path } => {
+            let groups = scan_pipeline(&path, &state)?;
+            print_summary("scan", &groups);
+        }
+        Commands::Dedupe { path, paranoid } => {
+            let groups = scan_pipeline(&path, &state)?;
+            dedupe_groups(&groups, &state, paranoid)?;
+            print_summary("dedupe", &groups);
+        }
+    }
+
+    Ok(())
+}
+
+fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<PathBuf>>> {
+    let size_groups = scanner::group_by_size(path)?;
+    let size_groups: Vec<Vec<PathBuf>> = size_groups
+        .into_values()
+        .filter(|paths| paths.len() > 1)
+        .collect();
+
+    let sparse_bar = progress("sparse hashing", size_groups.len() as u64);
+    let mut sparse_groups: Vec<Vec<PathBuf>> = Vec::new();
+
+    for group in size_groups {
+        sparse_bar.inc(1);
+        let sparse_hashes: Vec<(Hash, PathBuf)> = group
+            .par_iter()
+            .map(|path| -> Result<Option<(Hash, PathBuf)>> {
+                let meta = std::fs::metadata(path)?;
+                let inode = meta.ino();
+                if state.is_inode_vaulted(inode)? {
+                    return Ok(None);
+                }
+                let hash = hasher::sparse_hash(path, meta.len())?;
+                Ok(Some((hash, path.clone())))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let mut buckets: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
+        for (hash, path) in sparse_hashes {
+            buckets.entry(hash).or_default().push(path);
+        }
+        for (_, paths) in buckets {
+            if paths.len() > 1 {
+                sparse_groups.push(paths);
+            }
+        }
+    }
+    sparse_bar.finish_and_clear();
+
+    let total_full: usize = sparse_groups.iter().map(|g| g.len()).sum();
+    let full_bar = progress("full hashing", total_full as u64);
+    let mut full_groups: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
+
+    for group in sparse_groups {
+        let full_hashes: Vec<(Hash, PathBuf, u64)> = group
+            .par_iter()
+            .map(|path| -> Result<(Hash, PathBuf, u64)> {
+                let meta = std::fs::metadata(path)?;
+                let hash = hasher::full_hash(path)?;
+                Ok((hash, path.clone(), meta.len()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        for (hash, path, size) in full_hashes {
+            full_bar.inc(1);
+            let modified = file_modified(path.as_path())?;
+            let metadata = FileMetadata {
+                size,
+                modified,
+                hash,
+            };
+            state.upsert_file(&path, &metadata)?;
+            full_groups.entry(hash).or_default().push(path);
+        }
+    }
+    full_bar.finish_and_clear();
+
+    for (hash, paths) in &full_groups {
+        if paths.len() > 1 {
+            state.set_cas_refcount(hash, paths.len() as u64)?;
+        }
+    }
+
+    Ok(full_groups)
+}
+
+fn dedupe_groups(
+    groups: &HashMap<Hash, Vec<PathBuf>>,
+    state: &state::State,
+    paranoid: bool,
+) -> Result<()> {
+    for (hash, paths) in groups {
+        if paths.len() < 2 {
+            continue;
+        }
+        let master = &paths[0];
+        let vault_path = vault::ensure_in_vault(hash, master)?;
+        let mut master_verified = false;
+        if paranoid && master.exists() {
+            match dedupe::compare_files(&vault_path, master) {
+                Ok(true) => master_verified = true,
+                Ok(false) => {
+                    eprintln!(
+                        "HASH COLLISION OR BIT ROT DETECTED: {}",
+                        master.display()
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    eprintln!("VERIFY FAILED (skipping): {}: {err}", master.display());
+                    continue;
+                }
+            }
+        }
+        if let Some(link_type) = dedupe::replace_with_link(&vault_path, master)? {
+            if link_type == dedupe::LinkType::HardLink {
+                let inode = std::fs::metadata(master)?.ino();
+                state.mark_inode_vaulted(inode)?;
+            }
+            if !is_temp_file(master) {
+                let name = display_name(master);
+                match link_type {
+                    dedupe::LinkType::Reflink => {
+                        if paranoid && master_verified {
+                            println!(
+                                "{} {} {}",
+                                "[REFLINK ]".bold().green(),
+                                "[VERIFIED]".bold().blue(),
+                                name
+                            );
+                        } else {
+                            println!("{} {}", "[REFLINK ]".bold().green(), name);
+                        }
+                    }
+                    dedupe::LinkType::HardLink => {
+                        if paranoid && master_verified {
+                            println!(
+                                "{} {} {}",
+                                "[HARDLINK]".bold().yellow(),
+                                "[VERIFIED]".bold().blue(),
+                                name
+                            );
+                        } else {
+                            println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                        }
+                    }
+                }
+            }
+        }
+
+        for path in paths.iter().skip(1) {
+            let mut verified = false;
+            if paranoid {
+                match dedupe::compare_files(&vault_path, path) {
+                    Ok(true) => verified = true,
+                    Ok(false) => {
+                        eprintln!(
+                            "HASH COLLISION OR BIT ROT DETECTED: {}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        eprintln!("VERIFY FAILED (skipping): {}: {err}", path.display());
+                        continue;
+                    }
+                }
+            }
+            if let Some(link_type) = dedupe::replace_with_link(&vault_path, path)? {
+                if link_type == dedupe::LinkType::HardLink {
+                    let inode = std::fs::metadata(path)?.ino();
+                    state.mark_inode_vaulted(inode)?;
+                }
+                if !is_temp_file(path) {
+                    let name = display_name(path);
+                    match link_type {
+                        dedupe::LinkType::Reflink => {
+                            if paranoid && verified {
+                                println!(
+                                    "{} {} {}",
+                                    "[REFLINK ]".bold().green(),
+                                    "[VERIFIED]".bold().blue(),
+                                    name
+                                );
+                            } else {
+                                println!("{} {}", "[REFLINK ]".bold().green(), name);
+                            }
+                        }
+                        dedupe::LinkType::HardLink => {
+                            if paranoid && verified {
+                                println!(
+                                    "{} {} {}",
+                                    "[HARDLINK]".bold().yellow(),
+                                    "[VERIFIED]".bold().blue(),
+                                    name
+                                );
+                            } else {
+                                println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        state.set_cas_refcount(hash, paths.len() as u64)?;
+    }
+    Ok(())
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn is_temp_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".imprint_tmp"))
+        .unwrap_or(false)
+}
+
+fn file_modified(path: &Path) -> Result<u64> {
+    let metadata = std::fs::metadata(path).with_context(|| "read metadata")?;
+    let modified = metadata.modified().with_context(|| "read modified time")?;
+    let duration = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(duration.as_secs())
+}
+
+fn progress(label: &str, total: u64) -> ProgressBar {
+    let bar = ProgressBar::new(total);
+    bar.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
+    bar.set_message(label.to_string());
+    bar
+}
+
+fn print_summary(mode: &str, groups: &HashMap<Hash, Vec<PathBuf>>) {
+    let duplicates = groups.values().filter(|g| g.len() > 1).count();
+    println!("{mode} complete. duplicate groups: {duplicates}");
+}
+</file>
+
+<file path="Cargo.toml">
+[package]
+name = "bdstorage"
+version = "0.1.0"
+edition = "2024"
+description = "A speed-first local data deduplication engine using tiered BLAKE3 hashing."
+license = "Apache-2.0"
+authors = ["Rakshat Pratap Singh"]
+repository = ""
+readme = "README.md"
+keywords = ["deduplication", "storage", "nvme", "blake3"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "imprint"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+crossbeam = "0.8"
+indicatif = "0.17"
+jwalk = "0.8"
+nix = { version = "0.27", features = ["ioctl"], optional = true }
+rayon = "1"
+redb = "2"
+reflink = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.27", features = ["ioctl"] }
+</file>
+
+<file path="README.md">
+# BDSTORAGE Deduplication Engine
+
+bdstorage is a speed-first, local file deduplication CLI. It scans a target directory, detects identical files using a tiered hashing pipeline, and replaces duplicates with reflinks (primary) or hard links (fallback). Identical content is stored in a content-addressable storage (CAS) vault backed by a small embedded database.
+
+---
+
+## Key Concepts
+
+- **Tiered pipeline** to minimize I/O:
+  1. **Size grouping** (zero-I/O)
+  2. **Sparse hashing** (12KB sample: first/middle/last)
+  3. **Full hashing** (BLAKE3 with 128KB buffer)
+
+- **CAS Vault**: Files are stored by content hash using a sharded directory layout.
+
+- **Linking strategy**:
+  - **Reflink** first (fast, CoW, same FS).
+  - **Hard link** fallback (same device).
+
+- **State DB**: Tracks file metadata and content references.
+
+---
+
+## Requirements
+
+- **Linux**
+- **Rust** (latest stable)
+- **Filesystem with reflink support** for best results (e.g., Btrfs, XFS). Hard links are used when reflinks aren’t available.
+
+---
+
+## Local Setup
+
+1) **Clone**
+```bash
+git clone https://github.com/Rakshat28/bdstorage
+cd bdstorage
+```
+
+2) **Install Rust**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+3) **Build**
+```bash
+cargo build
+```
+
+---
+
+## Usage
+
+### 1) Scan
+Runs the tiered pipeline to find duplicate candidates.
+
+```bash
+cargo run -- scan /path/to/dir
+```
+
+### 2) Dedupe
+Moves the master copy to the vault and links duplicates back.
+
+```bash
+cargo run -- dedupe /path/to/dir
+```
+
+---
+
+## Data Locations
+
+- **State DB**: `~/.bdstorage/state.redb`
+- **CAS Vault**: `~/.bdstorage/store/`
+
+The DB and vault are created automatically on first run.
+
+---
+
+## How Deduplication Works (High Level)
+
+1. **Walk** the directory in parallel (jwalk).
+2. **Group by size**; unique sizes are discarded.
+3. **Sparse hash** (12KB sample) to filter further.
+4. **Full hash** to confirm identical content.
+5. **Vault**:
+   - If the hash doesn’t exist, move the file into the vault.
+   - If it exists, it is the master copy.
+6. **Link**:
+   - Reflink from vault to original location.
+   - If reflink fails, hard link instead.
+
+---
+
+## Reset / Clean State
+
+To remove the DB and vault:
+
+```bash
+rm -f ~/.bdstorage/state.redb
+rm -rf ~/.bdstorage/store/
+```
+
+
+## Safety Guarantees
+
+- Original data is never deleted until a verified copy exists in the vault.
+- Hash verification is always performed before linking.
+- If the process is interrupted, partially processed files are left untouched.
+- Reflinks/hardlinks are only created after successful vault storage.
+</file>
+
+</files>
