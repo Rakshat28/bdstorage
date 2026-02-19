@@ -40,6 +40,11 @@ enum Commands {
         )]
         dry_run: bool,
     },
+    Restore {
+        path: PathBuf,
+        #[arg(long, short = 'n', help = "Simulate operations without modifying filesystem.")]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -62,6 +67,9 @@ fn run() -> Result<()> {
             let groups = scan_pipeline(&path, &state)?;
             dedupe_groups(&groups, &state, paranoid, dry_run)?;
             print_summary("dedupe", &groups);
+        }
+        Commands::Restore { path, dry_run } => {
+            restore_pipeline(&path, &state, dry_run)?;
         }
     }
 
@@ -427,4 +435,111 @@ fn progress(label: &str, total: u64) -> ProgressBar {
 fn print_summary(mode: &str, groups: &HashMap<Hash, Vec<PathBuf>>) {
     let duplicates = groups.values().filter(|g| g.len() > 1).count();
     println!("{mode} complete. duplicate groups: {duplicates}");
+}
+
+fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<()> {
+    let multi = MultiProgress::new();
+    let restore_spinner = multi.add(ProgressBar::new_spinner());
+    restore_spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner} {msg}")
+            .unwrap(),
+    );
+    restore_spinner.set_message("Scanning for deduplicated files to restore...");
+
+    let mut restored_count = 0;
+    let mut bytes_restored = 0;
+
+    for entry in jwalk::WalkDir::new(path).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let file_path = entry.path();
+        if is_temp_file(&file_path) {
+            continue;
+        }
+
+        let metadata = match std::fs::metadata(&file_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let inode = metadata.ino();
+        let size = metadata.len();
+        
+        let mut needs_restore = false;
+        let mut target_hash: Option<Hash> = None;
+
+        // Condition 1: Hardlink detected in DB
+        if state.is_inode_vaulted(inode).unwrap_or(false) {
+            needs_restore = true;
+            if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
+                target_hash = Some(file_meta.hash);
+            }
+        } 
+        // Condition 2: Reflink/File indexed in DB and matches vault
+        else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
+            if let Ok(vault_path) = vault::shard_path(&file_meta.hash) {
+                if vault_path.exists() {
+                    needs_restore = true;
+                    target_hash = Some(file_meta.hash);
+                }
+            }
+        }
+
+        if needs_restore {
+            let name = display_name(&file_path);
+            restore_spinner.set_message(format!("Restoring {name}..."));
+            
+            if dry_run {
+                println!("{} Would restore: {}", "[DRY RUN]".yellow().dimmed(), name);
+                if let Some(hash) = target_hash {
+                    println!("{}   -> Would decrement refcount for {}", "[DRY RUN]".yellow().dimmed(), crate::types::hash_to_hex(&hash));
+                }
+                restored_count += 1;
+                bytes_restored += size;
+            } else {
+                if dedupe::restore_file(&file_path).is_ok() {
+                    println!("{} {}", "[RESTORED]".bold().cyan(), name);
+                    
+                    // DB Cleanup
+                    let _ = state.unmark_inode_vaulted(inode);
+                    let _ = state.remove_file_from_index(&file_path);
+                    
+                    // Refcount and Vault Cleanup
+                    if let Some(hash) = target_hash {
+                        if let Ok(mut current_refcount) = state.get_cas_refcount(&hash) {
+                            if current_refcount > 0 {
+                                current_refcount -= 1;
+                                if current_refcount == 0 {
+                                    let _ = vault::remove_from_vault(&hash);
+                                    let _ = state.remove_cas_refcount(&hash);
+                                    println!("{}    -> Vault copy pruned (refcount 0)", "[GC]".bold().magenta());
+                                } else {
+                                    let _ = state.set_cas_refcount(&hash, current_refcount);
+                                }
+                            }
+                        }
+                    }
+
+                    restored_count += 1;
+                    bytes_restored += size;
+                } else {
+                    eprintln!("{} Failed to restore {name}", "[ERROR]".bold().red());
+                }
+            }
+        }
+    }
+
+    restore_spinner.finish_and_clear();
+    println!(
+        "Restore complete. Files restored: {} ({:.2} MB)", 
+        restored_count, 
+        bytes_restored as f64 / 1_048_576.0
+    );
+    Ok(())
 }

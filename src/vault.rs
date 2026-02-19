@@ -34,3 +34,23 @@ pub fn ensure_in_vault(hash: &Hash, src: &Path) -> Result<PathBuf> {
         }
     }
 }
+
+pub fn remove_from_vault(hash: &Hash) -> Result<()> {
+    let dest = shard_path(hash)?;
+    if dest.exists() {
+        std::fs::remove_file(&dest).with_context(|| "remove file from vault")?;
+        
+        // Attempt to clean up shard directories if they are empty
+        if let Some(shard_b) = dest.parent() {
+            if std::fs::read_dir(shard_b).map(|mut i| i.next().is_none()).unwrap_or(false) {
+                let _ = std::fs::remove_dir(shard_b);
+                if let Some(shard_a) = shard_b.parent() {
+                    if std::fs::read_dir(shard_a).map(|mut i| i.next().is_none()).unwrap_or(false) {
+                        let _ = std::fs::remove_dir(shard_a);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

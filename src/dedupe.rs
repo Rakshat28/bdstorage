@@ -93,3 +93,30 @@ pub fn compare_files(path1: &Path, path2: &Path) -> Result<bool> {
         }
     }
 }
+
+pub fn restore_file(target: &Path) -> Result<()> {
+    let mut temp = target.to_path_buf();
+    temp.set_extension("imprint_tmp");
+    if temp.exists() {
+        std::fs::remove_file(&temp).with_context(|| "remove existing temp file")?;
+    }
+
+    let mut cleanup = TempCleanup::new(temp.clone());
+
+    // Manual copy strictly breaks reflinks/shared extents by forcing byte allocation
+    {
+        let mut src = File::open(target).with_context(|| "open target for read")?;
+        let mut dst = File::create(&temp).with_context(|| "create temp file")?;
+        std::io::copy(&mut src, &mut dst).with_context(|| "copy bytes to temp file")?;
+    }
+    
+    // Preserve original permissions
+    if let Ok(meta) = std::fs::metadata(target) {
+        let _ = std::fs::set_permissions(&temp, meta.permissions());
+    }
+
+    std::fs::rename(&temp, target).with_context(|| "replace target with restored copy")?;
+    cleanup.disarm();
+    
+    Ok(())
+}
