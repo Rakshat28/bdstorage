@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2024"
 description = "A speed-first local data deduplication engine using tiered BLAKE3 hashing."
 license = "Apache-2.0"
-authors = ["Rakshat Pratap Singh"]
+authors = ["Rakshat28"]
 repository = ""
 readme = "README.md"
 keywords = ["deduplication", "storage", "nvme", "blake3"]
 categories = ["command-line-utilities", "filesystem"]
 
 [[bin]]
-name = "imprint"
+name = "bdstorage"
 path = "src/main.rs"
 
 [dependencies]
