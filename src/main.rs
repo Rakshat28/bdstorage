@@ -17,7 +17,14 @@ use std::path::{Path, PathBuf};
 use crate::types::{FileMetadata, Hash};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Imprint - speed-first deduplication engine")]
+#[command(
+    name = "bdstorage",
+    author,
+    version,
+    about = "bdstorage: A speed-first, local file deduplication engine.",
+    long_about = "bdstorage uses a Tiered Hashing philosophy to minimize I/O overhead:\n\nSize Grouping: Eliminates unique file sizes immediately.\n\nSparse Hashing: Samples 12KB (start/middle/end) to identify candidates.\n\nFull BLAKE3 Hashing: Verifies matches with high-performance 128KB buffering.",
+    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS:\n  State DB: ~/.bdstorage/state.redb\n  CAS Vault: ~/.bdstorage/store\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  -h, --help     Print help\n  -V, --version  Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid     Available on the dedupe subcommand. Forces a byte-for-byte\n                 verification before linking to guarantee 100% collision safety.\n\n  -n, --dry-run  Available on dedupe and restore subcommands. Simulates operations\n                 without modifying the filesystem or the database.\n\n{all-args}{after-help}"
+)]
 struct Args {
     #[command(subcommand)]
     command: Commands,
@@ -25,24 +32,38 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Scan { path: PathBuf },
-    Dedupe {
+    /// Perform a read-only analysis of a directory.
+    ///
+    /// Scans the target path and identifies duplicate groups using tiered hashing
+    /// without moving any files or modifying the filesystem.
+    Scan {
+        /// The directory to analyze
         path: PathBuf,
-        #[arg(
-            long,
-            help = "Perform byte-for-byte verification before linking to guarantee 100% collision safety."
-        )]
+    },
+    /// Deduplicate a directory by moving master copies to the vault.
+    ///
+    /// This is a write-mode operation. It moves the 'master' copy of a duplicate group
+    /// into the internal vault and replaces all instances (including the original)
+    /// with reflinks or hard links.
+    Dedupe {
+        /// The directory to deduplicate
+        path: PathBuf,
+        /// Perform byte-for-byte verification before linking to guarantee 100% collision safety.
+        #[arg(long)]
         paranoid: bool,
-        #[arg(
-            long,
-            short = 'n',
-            help = "Simulate operations without modifying the filesystem or database."
-        )]
+        /// Simulate operations without modifying the filesystem or database.
+        #[arg(long, short = 'n')]
         dry_run: bool,
     },
+    /// Restore deduplicated files to their original independent state.
+    ///
+    /// Breaks links and copies data back from the vault to the original location.
+    /// If a vault file's reference count hits zero, it is pruned.
     Restore {
+        /// The directory to restore
         path: PathBuf,
-        #[arg(long, short = 'n', help = "Simulate operations without modifying filesystem.")]
+        /// Simulate operations without modifying the filesystem or database.
+        #[arg(long, short = 'n')]
         dry_run: bool,
     },
 }
