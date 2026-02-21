@@ -1,110 +1,125 @@
-# BDSTORAGE Deduplication Engine
+# bdstorage DeDuplication
 
-bdstorage is a speed-first, local file deduplication CLI. It scans a target directory, detects identical files using a tiered hashing pipeline, and replaces duplicates with reflinks (primary) or hard links (fallback). Identical content is stored in a content-addressable storage (CAS) vault backed by a small embedded database.
+**A speed-first, local file deduplication engine designed to maximize storage efficiency using tiered BLAKE3 hashing and Copy-on-Write (CoW) reflinks.**
 
----
-
-## Key Concepts
-
-- **Tiered pipeline** to minimize I/O:
-  1. **Size grouping** (zero-I/O)
-  2. **Sparse hashing** (12KB sample: first/middle/last)
-  3. **Full hashing** (BLAKE3 with 128KB buffer)
-
-- **CAS Vault**: Files are stored by content hash using a sharded directory layout.
-
-- **Linking strategy**:
-  - **Reflink** first (fast, CoW, same FS).
-  - **Hard link** fallback (same device).
-
-- **State DB**: Tracks file metadata and content references.
+`bdstorage` scans a target directory, detects identical files through a highly optimized pipeline, and replaces duplicates with lightweight links back to a centralized vault. It is built in Rust and tailored for modern Linux filesystems.
 
 ---
 
-## Requirements
-
-- **Linux**
-- **Rust** (latest stable)
-- **Filesystem with reflink support** for best results (e.g., Btrfs, XFS). Hard links are used when reflinks aren’t available.
+## Table of Contents
+1. [Why bdstorage?](#-why-bdstorage)
+2. [How It Works (Architecture)](#-how-it-works-architecture)
+3. [System Requirements](#-system-requirements)
+4. [Installation](#-installation)
+5. [Usage Guide](#-usage-guide)
+6. [Data Locations & Storage](#-data-locations--storage)
+7. [Safety Guarantees](#-safety-guarantees)
+8. [License](#-license)
 
 ---
 
-## Local Setup
+## Why bdstorage?
 
-1) **Clone**
+Traditional deduplication tools often thrash your disk by reading every single byte of every file. `bdstorage` takes a smarter, speed-first approach to minimize I/O overhead.
+
+It employs a **Tiered Hashing Pipeline**:
+1. **Size Grouping (Zero I/O):** Files are grouped by exact byte size. Unique sizes are immediately discarded from the deduplication pool.
+2. **Sparse Hashing (Minimal I/O):** For files larger than 12KB, the engine reads a small 12KB sample (4KB from the start, middle, and end) to quickly eliminate files that share the same size but have different contents. On Linux, it leverages `fiemap` ioctls to handle sparse files intelligently.
+3. **Full BLAKE3 Hashing (High Throughput):** Only files that pass the sparse hash check undergo a full BLAKE3 cryptographic hash using a high-performance 128KB buffer to confirm identical content.
+
+---
+
+## How It Works (Architecture)
+
+When identical files are confirmed, `bdstorage` uses a **Content-Addressable Storage (CAS) Vault**.
+
+1. **Vaulting:** The first instance of a file (the "master") is moved into a hidden local vault. It is renamed to its BLAKE3 hash.
+2. **Linking:** `bdstorage` replaces the original file and any subsequent duplicates with a link pointing to the vaulted master.
+    * **Primary Strategy (Reflink):** Tries to create a Copy-on-Write (CoW) reflink. This is instantaneous and shares the underlying disk extents.
+    * **Fallback Strategy (Hard Link):** If the filesystem does not support reflinks, it falls back to standard hard links.
+3. **State Tracking:** An embedded, low-latency `redb` database tracks file metadata, vault index, and reference counts to ensure nothing is accidentally deleted.
+
+---
+
+## System Requirements
+
+* **Operating System:** Linux (Required for `fiemap` ioctl sparse file optimizations).
+* **Filesystem:** For maximum performance and safety, a filesystem that supports **reflinks** (e.g., Btrfs, XFS) is strongly recommended.
+* **Rust:** Latest stable toolchain (if building from source).
+
+---
+
+## Installation
+
+### Option 1: Install via Cargo (crates.io)
 ```bash
-git clone https://github.com/Rakshat28/bdstorage
+cargo install bdstorage
+```
+
+### Option 2: Build from Source
+```bash
+git clone [https://github.com/Rakshat28/bdstorage](https://github.com/Rakshat28/bdstorage)
 cd bdstorage
-```
-
-2) **Install Rust**
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-```
-
-3) **Build**
-```bash
-cargo build
+cargo build --release
 ```
 
 ---
 
-## Usage
+## Usage Guide
 
-### 1) Scan
-Runs the tiered pipeline to find duplicate candidates.
-
+### 1. Scan (Read-Only Analysis)
+Analyze a directory to find duplicate candidates. This operation is 100% read-only and will not move files or modify your database.
 ```bash
-cargo run -- scan /path/to/dir
+bdstorage scan /path/to/directory
 ```
 
-### 2) Dedupe
-Moves the master copy to the vault and links duplicates back.
-
+### 2. Dedupe (Write-Mode)
+Execute the deduplication process. Master files are vaulted, and duplicates are replaced with reflinks or hard links.
 ```bash
-cargo run -- dedupe /path/to/dir
+bdstorage dedupe /path/to/directory
 ```
 
----
+**Flags:**
+* `--paranoid`: Perform a strict byte-for-byte comparison against the vaulted file before linking to guarantee 100% collision safety and protect against bit rot.
+* `-n, --dry-run`: Simulate the deduplication process, printing what *would* happen without actually modifying the filesystem or database.
 
-## Data Locations
+### 3. Restore (Un-Dedupe)
+Reverse the deduplication process. This breaks the shared links and restores independent, physical copies of the data back to their original locations.
+```bash
+bdstorage restore /path/to/directory
+```
+*Note: If a vaulted file's reference count drops to zero during a restore, `bdstorage` automatically prunes it to free up space (Garbage Collection).*
 
-- **State DB**: `~/.bdstorage/state.redb`
-- **CAS Vault**: `~/.bdstorage/store/`
-
-The DB and vault are created automatically on first run.
-
----
-
-## How Deduplication Works (High Level)
-
-1. **Walk** the directory in parallel (jwalk).
-2. **Group by size**; unique sizes are discarded.
-3. **Sparse hash** (12KB sample) to filter further.
-4. **Full hash** to confirm identical content.
-5. **Vault**:
-   - If the hash doesn’t exist, move the file into the vault.
-   - If it exists, it is the master copy.
-6. **Link**:
-   - Reflink from vault to original location.
-   - If reflink fails, hard link instead.
+**Flags:**
+* `-n, --dry-run`: Simulate the restoration process without modifying the filesystem.
 
 ---
 
-## Reset / Clean State
+## Data Locations & Storage
 
-To remove the DB and vault:
+Your data never leaves your machine. `bdstorage` automatically provisions the following directories in your home folder:
 
+* **State DB:** `~/.bdstorage/state.redb`
+* **CAS Vault:** `~/.bdstorage/store/`
+
+To perform a completely clean reset of the engine:
 ```bash
 rm -f ~/.bdstorage/state.redb
 rm -rf ~/.bdstorage/store/
 ```
 
+---
 
 ## Safety Guarantees
 
-- Original data is never deleted until a verified copy exists in the vault.
-- Hash verification is always performed before linking.
-- If the process is interrupted, partially processed files are left untouched.
-- Reflinks/hardlinks are only created after successful vault storage.
+We take your data seriously. `bdstorage` is designed with the following invariants:
+* **No Premature Deletion:** Original data is never removed until a verified copy has been successfully written to the CAS vault.
+* **Verification First:** Hash verification is consistently performed before linking.
+* **Atomic Failures:** If the process is interrupted, partially processed files are left completely untouched.
+* **Link Safety:** Reflinks and hard links are only created after a successful vault storage operation.
+
+---
+
+## License
+
+This project is open-source and distributed under the **Apache License 2.0**.
