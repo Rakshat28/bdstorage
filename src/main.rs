@@ -261,12 +261,12 @@ fn dedupe_groups(
             println!("  • Reflinks: Different inodes, individual metadata, copy-on-write protection");
             println!("  • Hard links: Shared inode, shared metadata, direct data sharing\n");
             println!("{}", "Implications:".bold());
-            println!("  • With hard links, modifying any deduplicated file affects all linked copies");
+            println!("  • With hard links, modifying any file affects all linked copies and the vault master");
             println!("  • All hard-linked files share the same timestamps and permissions");
-            println!("  • Hard links use less memory but require careful file handling\n");
+            println!("  • Hard links save disk space but require careful file handling\n");
             println!("{}", "Your options:".bold());
             println!("  1. {} - Files will be skipped (safe default)", "Do nothing".green());
-            println!("  2. {} - Enables deduplication with shared (new)metadata", "Add --allow-unsafe-hardlinks".yellow());
+            println!("  2. {} - Enables deduplication with shared metadata", "Add --allow-unsafe-hardlinks".yellow());
             println!("  3. {} - Btrfs, XFS (Linux), APFS (macOS), ReFS (Windows)\n", "Switch to a reflink-capable filesystem".cyan());
             println!("{}", "━".repeat(80).yellow());
             println!();

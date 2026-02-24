@@ -42,21 +42,6 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
         return Ok(None);
     }
 
-    // Capture target metadata before replacement
-    let target_meta = std::fs::metadata(target).with_context(|| "read target metadata")?;
-    let target_permissions = target_meta.permissions();
-    let target_mtime = FileTime::from_last_modification_time(&target_meta);
-    
-    // Capture extended attributes
-    let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
-    if let Ok(attrs) = xattr::list(target) {
-        for attr_name in attrs {
-            if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
-                target_xattrs.push((attr_name, attr_value));
-            }
-        }
-    }
-
     let mut temp = target.to_path_buf();
     temp.set_extension("imprint_tmp");
     if temp.exists() {
@@ -67,10 +52,25 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
 
     match reflink::reflink(master, &temp) {
         Ok(_) => {
+            // Capture target metadata before replacement (only for successful reflink)
+            let target_meta = std::fs::metadata(target).with_context(|| "read target metadata")?;
+            let target_permissions = target_meta.permissions();
+            let target_mtime = FileTime::from_last_modification_time(&target_meta);
+            
+            // Capture extended attributes
+            let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
+            if let Ok(attrs) = xattr::list(target) {
+                for attr_name in attrs {
+                    if let Ok(Some(attr_value)) = xattr::get(target, &attr_name) {
+                        target_xattrs.push((attr_name, attr_value));
+                    }
+                }
+            }
+            
             std::fs::rename(&temp, target).with_context(|| "replace target with reflink")?;
             cleanup.disarm();
             
-            // Restore metadata
+            // Restore metadata (safe for reflinks - different inodes)
             apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
             
             Ok(Some(LinkType::Reflink))
@@ -86,8 +86,8 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
                 std::fs::rename(&temp, target).with_context(|| "replace target with hard link")?;
                 cleanup.disarm();
                 
-                // Restore metadata
-                apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
+                // DO NOT restore metadata for hardlinks - they share the same inode as the vault master
+                // Restoring metadata would mutate the vault master and all other linked copies
                 
                 Ok(Some(LinkType::HardLink))
             } else {
