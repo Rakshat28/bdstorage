@@ -23,7 +23,7 @@ use crate::types::{FileMetadata, Hash};
     version,
     about = "bdstorage: A speed-first, local file deduplication engine.",
     long_about = "bdstorage uses a Tiered Hashing philosophy to minimize I/O overhead:\n\nSize Grouping: Eliminates unique file sizes immediately.\n\nSparse Hashing: Samples 12KB (start/middle/end) to identify candidates.\n\nFull BLAKE3 Hashing: Verifies matches with high-performance 128KB buffering.",
-    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS:\n  State DB: ~/.bdstorage/state.redb\n  CAS Vault: ~/.bdstorage/store\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  -h, --help     Print help\n  -V, --version  Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. WARNING: Hard links share\n                             the same inode. Modifying one file will affect all linked copies\n                             and the vault master.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
+    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS:\n  State DB: ~/.bdstorage/state.redb\n  CAS Vault: ~/.bdstorage/store\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  -h, --help     Print help\n  -V, --version  Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
 )]
 struct Args {
     #[command(subcommand)]
@@ -55,8 +55,8 @@ enum Commands {
         #[arg(long, short = 'n')]
         dry_run: bool,
         /// Allow unsafe hard links as fallback when CoW reflinks are not supported.
-        /// WARNING: Hard links share the same inode without CoW semantics. Modifying
-        /// one file will affect all linked copies and the vault master.
+        /// Hard links share the same inode, so all linked files will have identical
+        /// metadata and modifications affect all linked copies.
         #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
         allow_unsafe_hardlinks: bool,
     },
@@ -257,13 +257,16 @@ fn dedupe_groups(
             println!("\nYour filesystem does not support CoW (Copy-on-Write) reflinks.");
             println!("Reflinks allow files to share disk space while remaining independent copies.");
             println!("When you modify a reflinked file, only the changed portions use new disk space.\n");
-            println!("{}", "Why this matters:".bold());
-            println!("  • Reflinks are SAFE - editing one file doesn't affect others");
-            println!("  • Hard links share the SAME inode - editing one file changes ALL copies");
-            println!("  • With hard links, modifying any deduplicated file will corrupt your vault\n");
+            println!("{}", "Key differences:".bold());
+            println!("  • Reflinks: Different inodes, individual metadata, copy-on-write protection");
+            println!("  • Hard links: Shared inode, shared metadata, direct data sharing\n");
+            println!("{}", "Implications:".bold());
+            println!("  • With hard links, modifying any file affects all linked copies and the vault master");
+            println!("  • All hard-linked files share the same timestamps and permissions");
+            println!("  • Hard links save disk space but require careful file handling\n");
             println!("{}", "Your options:".bold());
-            println!("  1. {} - Files will be skipped (current behavior)", "Do nothing".green());
-            println!("  2. {} - Use hard links at your own risk", "Add --allow-unsafe-hardlinks".yellow());
+            println!("  1. {} - Files will be skipped (safe default)", "Do nothing".green());
+            println!("  2. {} - Enables deduplication with shared metadata", "Add --allow-unsafe-hardlinks".yellow());
             println!("  3. {} - Btrfs, XFS (Linux), APFS (macOS), ReFS (Windows)\n", "Switch to a reflink-capable filesystem".cyan());
             println!("{}", "━".repeat(80).yellow());
             println!();

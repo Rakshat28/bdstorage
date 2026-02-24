@@ -35,9 +35,10 @@ When identical files are confirmed, `bdstorage` uses a **Content-Addressable Sto
 
 1. **Vaulting:** The first instance of a file (the "master") is moved into a hidden local vault. It is renamed to its BLAKE3 hash.
 2. **Linking:** `bdstorage` replaces the original file and any subsequent duplicates with a link pointing to the vaulted master.
-    * **Primary Strategy (Reflink - Strict Default):** Creates a Copy-on-Write (CoW) reflink. This is instantaneous, shares the underlying disk extents, and preserves data independence. **If the filesystem does not support reflinks, the file is skipped by default to prevent data corruption.**
-    * **Opt-In Fallback (Hard Link):** Only available via the `--allow-unsafe-hardlinks` flag. Hard links share the same inode without CoW semantics. **WARNING:** Modifying one deduplicated file will unintentionally overwrite the master file in the CAS vault and all other duplicate files pointing to it. Use this option only if you understand the risks.
+    * **Primary Strategy (Reflink - Strict Default):** Creates a Copy-on-Write (CoW) reflink. This is instantaneous, shares the underlying disk extents, and preserves data independence. Reflinks preserve each file's individual metadata (permissions, modification times, extended attributes). If the filesystem does not support reflinks, files are skipped by default.
+    * **Alternative Strategy (Hard Link):** Available via the `--allow-unsafe-hardlinks` flag. Hard links share the same inode, which means all linked files share the same metadata (timestamps, permissions). This is suitable for read-only archives or when metadata independence is not required. Note that modifying any hard-linked file will affect all linked copies since they share the same underlying inode.
 3. **State Tracking:** An embedded, low-latency `redb` database tracks file metadata, vault index, and reference counts to ensure nothing is accidentally deleted.
+4. **Metadata Preservation:** When using reflinks, `bdstorage` automatically preserves each file's original permissions, modification times, and extended attributes, ensuring deduplication is completely transparent to applications.
 
 ---
 
@@ -82,7 +83,7 @@ bdstorage dedupe /path/to/directory
 **Flags:**
 * `--paranoid`: Perform a strict byte-for-byte comparison against the vaulted file before linking to guarantee 100% collision safety and protect against bit rot.
 * `-n, --dry-run`: Simulate the deduplication process, printing what *would* happen without actually modifying the filesystem or database.
-* `--allow-unsafe-hardlinks`: **[USE WITH CAUTION]** Allow hard link fallback when the filesystem does not support CoW reflinks. Hard links share the same inode without copy-on-write semantics, meaning modifications to one file will affect all linked copies and the vault master. Only use this flag if you understand the mutation risks.
+* `--allow-unsafe-hardlinks`: Enable hard link fallback when the filesystem does not support CoW reflinks. Hard links share the same inode, meaning all linked files will have identical metadata (timestamps, permissions). Best suited for read-only data or scenarios where metadata independence is not required.
 
 ### 3. Restore (Un-Dedupe)
 Reverse the deduplication process. This breaks the shared links and restores independent, physical copies of the data back to their original locations.
