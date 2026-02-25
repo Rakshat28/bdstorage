@@ -362,6 +362,17 @@ fn dedupe_groups(
                 Ok(None) => {}
                 Err(e) => {
                     if e.to_string().contains("reflink not supported") {
+                        if let Err(restore_err) = std::fs::rename(&vault_path, master) {
+                            let copy_result = std::fs::copy(&vault_path, master)
+                                .and_then(|_| std::fs::remove_file(&vault_path));
+                            if let Err(copy_err) = copy_result {
+                                eprintln!(
+                                    "[ERROR] Failed to restore master from vault. File remains at {}. Rename error: {restore_err}. Copy/remove error: {copy_err}",
+                                    vault_path.display()
+                                );
+                            }
+                        }
+
                         let name = display_name(master);
                         warn_reflink_unsupported(&name);
                         continue;
