@@ -32,42 +32,20 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Perform a read-only analysis of a directory.
-    ///
-    /// Scans the target path and identifies duplicate groups using tiered hashing
-    /// without moving any files or modifying the filesystem.
     Scan {
-        /// The directory to analyze
         path: PathBuf,
     },
-    /// Deduplicate a directory by moving master copies to the vault.
-    ///
-    /// This is a write-mode operation. It moves the 'master' copy of a duplicate group
-    /// into the internal vault and replaces all instances (including the original)
-    /// with reflinks or hard links.
     Dedupe {
-        /// The directory to deduplicate
         path: PathBuf,
-        /// Perform byte-for-byte verification before linking to guarantee 100% collision safety.
         #[arg(long)]
         paranoid: bool,
-        /// Simulate operations without modifying the filesystem or database.
         #[arg(long, short = 'n')]
         dry_run: bool,
-        /// Allow unsafe hard links as fallback when CoW reflinks are not supported.
-        /// Hard links share the same inode, so all linked files will have identical
-        /// metadata and modifications affect all linked copies.
         #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = false)]
         allow_unsafe_hardlinks: bool,
     },
-    /// Restore deduplicated files to their original independent state.
-    ///
-    /// Breaks links and copies data back from the vault to the original location.
-    ///    cargo run -- dedupe ~/Desktop/experiment/ --help    cargo run -- dedupe ~/Desktop/experiment/ --help If a vault file's reference count hits zero, it is pruned.
     Restore {
-        /// The directory to restore
         path: PathBuf,
-        /// Simulate operations without modifying the filesystem or database.
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
@@ -103,7 +81,6 @@ fn run() -> Result<()> {
 }
 
 fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<PathBuf>>> {
-    // Setup UI: Create MultiProgress and progress bars
     let multi = MultiProgress::new();
     let scan_spinner = multi.add(ProgressBar::new_spinner());
     scan_spinner.set_style(
@@ -115,20 +92,16 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     let hash_bar = multi.add(progress("Indexing/Hashing", 0));
 
-    // Spawn scanner thread with channel
     let (scan_tx, scan_rx) = channel::unbounded();
     let path_clone = path.to_path_buf();
     let scanner_handle = std::thread::spawn(move || -> Result<()> {
         scanner::stream_scan(&path_clone, scan_tx)
     });
 
-    // Create channel for hashing tasks
     let (hash_task_tx, hash_task_rx) = channel::unbounded::<PathBuf>();
 
-    // Create channel for results
     let (result_tx, result_rx) = channel::unbounded::<(Hash, PathBuf)>();
 
-    // Spawn worker threads for hashing
     let state_clone = state.clone();
     let num_workers = std::cmp::min(rayon::current_num_threads(), 8);
     let mut worker_handles = vec![];
@@ -151,7 +124,6 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
                     let size = metadata.len();
                     if let Ok(_) = hasher::sparse_hash(&file_path, size) {
-                        // For now, always perform full hash for indexing
                         if let Ok(full_hash) = hasher::full_hash(&file_path) {
                             let modified = file_modified(&file_path).unwrap_or(0);
                             let file_metadata = FileMetadata {
@@ -171,7 +143,6 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
         worker_handles.push(handle);
     }
 
-    // Coordinator loop: maintain size_map and send collision files to hashing
     let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
 
     loop {
@@ -185,23 +156,19 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
                     let len_before = entry.len();
                     entry.push(file_path.clone());
 
-                    // Collision trigger: send files to hashing when we hit count 2 or more
                     if len_before == 1 {
-                        // First collision: send both files (index 0 and 1)
                         if let Some(first_file) = entry.get(0).cloned() {
                             let _ = hash_task_tx.send(first_file);
                         }
                         let _ = hash_task_tx.send(file_path);
                         hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
                     } else if len_before > 1 {
-                        // Subsequent collision: send only the new file
                         let _ = hash_task_tx.send(file_path);
                         hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
                     }
                 }
             }
             Err(_) => {
-                // Scanner thread done
                 break;
             }
         }
@@ -209,21 +176,16 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     scan_spinner.finish_and_clear();
 
-    // Wait for scanner to finish and handle any errors
     let _ = scanner_handle.join();
 
-    // Drop the hash_task_tx so workers know when to stop
     drop(hash_task_tx);
 
-    // Wait for all workers to finish
     for handle in worker_handles {
         let _ = handle.join();
     }
 
-    // Drop result_tx so we can collect results
     drop(result_tx);
 
-    // Collect all hashing results
     let mut results: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
     while let Ok((hash, path)) = result_rx.recv() {
         results.entry(hash).or_default().push(path);
@@ -231,7 +193,6 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     hash_bar.finish_and_clear();
 
-    // Set refcount for collisions
     for (hash, paths) in &results {
         if paths.len() > 1 {
             state.set_cas_refcount(hash, paths.len() as u64)?;
@@ -281,7 +242,6 @@ fn dedupe_groups(
         }
         let master = &paths[0];
         
-        // Handle master file: either move to vault or calculate theoretical path
         let vault_path = if dry_run {
             let theoretical_path = vault::shard_path(hash)?;
             let name = display_name(master);
@@ -321,7 +281,6 @@ fn dedupe_groups(
             );
         }
         
-        // Handle master file replacement (or dry-run simulation)
         if !dry_run {
             match dedupe::replace_with_link(&vault_path, master, allow_unsafe_hardlinks) {
                 Ok(Some(link_type)) => {
@@ -382,7 +341,6 @@ fn dedupe_groups(
                 }
             }
         } else {
-            // Dry-run: simulate linking
             let name = display_name(master);
             println!(
                 "{} Would dedupe: {} -> {} (reflink/hardlink)",
@@ -392,7 +350,6 @@ fn dedupe_groups(
             );
         }
 
-        // Handle duplicates
         for path in paths.iter().skip(1) {
             let mut verified = false;
             if paranoid && !dry_run {
@@ -461,7 +418,6 @@ fn dedupe_groups(
                     }
                 }
             } else {
-                // Dry-run: simulate linking
                 let name = display_name(path);
                 println!(
                     "{} Would dedupe: {} -> {} (reflink/hardlink)",
@@ -472,7 +428,6 @@ fn dedupe_groups(
             }
         }
         
-        // Handle database state updates (or dry-run simulation)
         if !dry_run {
             state.set_cas_refcount(hash, paths.len() as u64)?;
         } else {
@@ -563,14 +518,12 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
         let mut needs_restore = false;
         let mut target_hash: Option<Hash> = None;
 
-        // Condition 1: Hardlink detected in DB
         if state.is_inode_vaulted(inode).unwrap_or(false) {
             needs_restore = true;
             if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
                 target_hash = Some(file_meta.hash);
             }
         } 
-        // Condition 2: Reflink/File indexed in DB and matches vault
         else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
             if let Ok(vault_path) = vault::shard_path(&file_meta.hash) {
                 if vault_path.exists() {
@@ -595,11 +548,9 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                 if dedupe::restore_file(&file_path).is_ok() {
                     println!("{} {}", "[RESTORED]".bold().cyan(), name);
                     
-                    // DB Cleanup
                     let _ = state.unmark_inode_vaulted(inode);
                     let _ = state.remove_file_from_index(&file_path);
-                    
-                    // Refcount and Vault Cleanup
+
                     if let Some(hash) = target_hash {
                         if let Ok(mut current_refcount) = state.get_cas_refcount(&hash) {
                             if current_refcount > 0 {
