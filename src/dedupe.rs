@@ -52,12 +52,10 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
 
     match reflink::reflink(master, &temp) {
         Ok(_) => {
-            // Capture target metadata before replacement (only for successful reflink)
             let target_meta = std::fs::metadata(target).with_context(|| "read target metadata")?;
             let target_permissions = target_meta.permissions();
             let target_mtime = FileTime::from_last_modification_time(&target_meta);
-            
-            // Capture extended attributes
+
             let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
             if let Ok(attrs) = xattr::list(target) {
                 for attr_name in attrs {
@@ -70,7 +68,6 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
             std::fs::rename(&temp, target).with_context(|| "replace target with reflink")?;
             cleanup.disarm();
             
-            // Restore metadata (safe for reflinks - different inodes)
             apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
             
             Ok(Some(LinkType::Reflink))
@@ -81,17 +78,12 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
             }
             
             if allow_unsafe_hardlinks {
-                // User explicitly opted into unsafe hardlinks
                 std::fs::hard_link(master, &temp).with_context(|| "create hard link")?;
                 std::fs::rename(&temp, target).with_context(|| "replace target with hard link")?;
                 cleanup.disarm();
-                
-                // DO NOT restore metadata for hardlinks - they share the same inode as the vault master
-                // Restoring metadata would mutate the vault master and all other linked copies
-                
+
                 Ok(Some(LinkType::HardLink))
             } else {
-                // Safety first: refuse to create hardlinks without explicit permission
                 anyhow::bail!("reflink not supported on this filesystem and --allow-unsafe-hardlinks not specified")
             }
         }
@@ -104,15 +96,12 @@ fn apply_metadata(
     mtime: FileTime,
     xattrs: &[(OsString, Vec<u8>)],
 ) -> Result<()> {
-    // Restore permissions
     std::fs::set_permissions(path, permissions.clone())
         .with_context(|| "restore file permissions")?;
-    
-    // Restore modification time
+
     filetime::set_file_mtime(path, mtime)
         .with_context(|| "restore file mtime")?;
-    
-    // Restore extended attributes (gracefully ignore unsupported errors)
+
     for (attr_name, attr_value) in xattrs {
         let _ = xattr::set(path, attr_name, attr_value);
     }
@@ -149,12 +138,10 @@ pub fn compare_files(path1: &Path, path2: &Path) -> Result<bool> {
 }
 
 pub fn restore_file(target: &Path) -> Result<()> {
-    // Capture original metadata before restoration
     let target_meta = std::fs::metadata(target).with_context(|| "read target metadata")?;
     let target_permissions = target_meta.permissions();
     let target_mtime = FileTime::from_last_modification_time(&target_meta);
-    
-    // Capture extended attributes
+
     let mut target_xattrs: Vec<(OsString, Vec<u8>)> = Vec::new();
     if let Ok(attrs) = xattr::list(target) {
         for attr_name in attrs {
@@ -172,7 +159,6 @@ pub fn restore_file(target: &Path) -> Result<()> {
 
     let mut cleanup = TempCleanup::new(temp.clone());
 
-    // Manual copy strictly breaks reflinks/shared extents by forcing byte allocation
     {
         let mut src = File::open(target).with_context(|| "open target for read")?;
         let mut dst = File::create(&temp).with_context(|| "create temp file")?;
@@ -182,7 +168,6 @@ pub fn restore_file(target: &Path) -> Result<()> {
     std::fs::rename(&temp, target).with_context(|| "replace target with restored copy")?;
     cleanup.disarm();
     
-    // Restore metadata
     apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
     
     Ok(())
