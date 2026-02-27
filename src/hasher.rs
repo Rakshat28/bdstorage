@@ -52,7 +52,8 @@ pub fn full_hash(path: &Path) -> Result<Hash> {
 fn read_at(file: &mut File, offset: u64, buffer: &mut [u8]) -> Result<()> {
     file.seek(SeekFrom::Start(offset))
         .with_context(|| "seek file")?;
-    file.read_exact(buffer).with_context(|| "read sparse chunk")?;
+    file.read_exact(buffer)
+        .with_context(|| "read sparse chunk")?;
     Ok(())
 }
 

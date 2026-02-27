@@ -1,4 +1,4 @@
-use crate::types::{hash_to_hex, Hash};
+use crate::types::{Hash, hash_to_hex};
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -87,10 +87,16 @@ pub fn remove_from_vault(hash: &Hash) -> Result<()> {
         std::fs::remove_file(&dest).with_context(|| "remove file from vault")?;
 
         if let Some(shard_b) = dest.parent() {
-            if std::fs::read_dir(shard_b).map(|mut i| i.next().is_none()).unwrap_or(false) {
+            if std::fs::read_dir(shard_b)
+                .map(|mut i| i.next().is_none())
+                .unwrap_or(false)
+            {
                 let _ = std::fs::remove_dir(shard_b);
                 if let Some(shard_a) = shard_b.parent() {
-                    if std::fs::read_dir(shard_a).map(|mut i| i.next().is_none()).unwrap_or(false) {
+                    if std::fs::read_dir(shard_a)
+                        .map(|mut i| i.next().is_none())
+                        .unwrap_or(false)
+                    {
                         let _ = std::fs::remove_dir(shard_a);
                     }
                 }
