@@ -34,3 +34,9 @@ xattr = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.27", features = ["ioctl"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+predicates = "3"
+walkdir = "2"

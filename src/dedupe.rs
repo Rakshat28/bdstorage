@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
+use filetime::FileTime;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use filetime::FileTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkType {
@@ -37,7 +37,11 @@ impl Drop for TempCleanup {
     }
 }
 
-pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: bool) -> Result<Option<LinkType>> {
+pub fn replace_with_link(
+    master: &Path,
+    target: &Path,
+    allow_unsafe_hardlinks: bool,
+) -> Result<Option<LinkType>> {
     if master == target {
         return Ok(None);
     }
@@ -64,19 +68,19 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
                     }
                 }
             }
-            
+
             std::fs::rename(&temp, target).with_context(|| "replace target with reflink")?;
             cleanup.disarm();
-            
+
             apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
-            
+
             Ok(Some(LinkType::Reflink))
         }
         Err(_) => {
             if temp.exists() {
                 let _ = std::fs::remove_file(&temp);
             }
-            
+
             if allow_unsafe_hardlinks {
                 std::fs::hard_link(master, &temp).with_context(|| "create hard link")?;
                 std::fs::rename(&temp, target).with_context(|| "replace target with hard link")?;
@@ -84,7 +88,9 @@ pub fn replace_with_link(master: &Path, target: &Path, allow_unsafe_hardlinks: b
 
                 Ok(Some(LinkType::HardLink))
             } else {
-                anyhow::bail!("reflink not supported on this filesystem and --allow-unsafe-hardlinks not specified")
+                anyhow::bail!(
+                    "reflink not supported on this filesystem and --allow-unsafe-hardlinks not specified"
+                )
             }
         }
     }
@@ -99,13 +105,12 @@ fn apply_metadata(
     std::fs::set_permissions(path, permissions.clone())
         .with_context(|| "restore file permissions")?;
 
-    filetime::set_file_mtime(path, mtime)
-        .with_context(|| "restore file mtime")?;
+    filetime::set_file_mtime(path, mtime).with_context(|| "restore file mtime")?;
 
     for (attr_name, attr_value) in xattrs {
         let _ = xattr::set(path, attr_name, attr_value);
     }
-    
+
     Ok(())
 }
 
@@ -167,8 +172,8 @@ pub fn restore_file(target: &Path) -> Result<()> {
 
     std::fs::rename(&temp, target).with_context(|| "replace target with restored copy")?;
     cleanup.disarm();
-    
+
     apply_metadata(target, &target_permissions, target_mtime, &target_xattrs)?;
-    
+
     Ok(())
 }

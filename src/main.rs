@@ -60,19 +60,34 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let state = state::State::open_default()?;
 
     match args.command {
         Commands::Scan { path } => {
+            let state = state::State::open_default()?;
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
-        Commands::Dedupe { path, paranoid, dry_run, allow_unsafe_hardlinks } => {
+        Commands::Dedupe {
+            path,
+            paranoid,
+            dry_run,
+            allow_unsafe_hardlinks,
+        } => {
+            let state = if dry_run {
+                state::State::open_readonly_if_exists()?
+            } else {
+                state::State::open_default()?
+            };
             let groups = scan_pipeline(&path, &state)?;
             dedupe_groups(&groups, &state, paranoid, dry_run, allow_unsafe_hardlinks)?;
             print_summary("dedupe", &groups);
         }
         Commands::Restore { path, dry_run } => {
+            let state = if dry_run {
+                state::State::open_readonly_if_exists()?
+            } else {
+                state::State::open_default()?
+            };
             restore_pipeline(&path, &state, dry_run)?;
         }
     }
@@ -94,9 +109,8 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     let (scan_tx, scan_rx) = channel::unbounded();
     let path_clone = path.to_path_buf();
-    let scanner_handle = std::thread::spawn(move || -> Result<()> {
-        scanner::stream_scan(&path_clone, scan_tx)
-    });
+    let scanner_handle =
+        std::thread::spawn(move || -> Result<()> { scanner::stream_scan(&path_clone, scan_tx) });
 
     let (hash_task_tx, hash_task_rx) = channel::unbounded::<PathBuf>();
 
@@ -116,25 +130,25 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
             while let Ok(file_path) = rx.recv() {
                 if let Ok(metadata) = std::fs::metadata(&file_path) {
                     let inode = metadata.ino();
-                    if let Ok(is_vaulted) = state_ref.is_inode_vaulted(inode) {
-                        if is_vaulted {
-                            continue;
-                        }
+                    if let Ok(is_vaulted) = state_ref.is_inode_vaulted(inode)
+                        && is_vaulted
+                    {
+                        continue;
                     }
 
                     let size = metadata.len();
-                    if let Ok(_) = hasher::sparse_hash(&file_path, size) {
-                        if let Ok(full_hash) = hasher::full_hash(&file_path) {
-                            let modified = file_modified(&file_path).unwrap_or(0);
-                            let file_metadata = FileMetadata {
-                                size,
-                                modified,
-                                hash: full_hash,
-                            };
-                            let _ = state_ref.upsert_file(&file_path, &file_metadata);
-                            let _ = tx.send((full_hash, file_path));
-                            hash_bar_clone.inc(1);
-                        }
+                    if let Ok(_) = hasher::sparse_hash(&file_path, size)
+                        && let Ok(full_hash) = hasher::full_hash(&file_path)
+                    {
+                        let modified = file_modified(&file_path).unwrap_or(0);
+                        let file_metadata = FileMetadata {
+                            size,
+                            modified,
+                            hash: full_hash,
+                        };
+                        let _ = state_ref.upsert_file(&file_path, &file_metadata);
+                        let _ = tx.send((full_hash, file_path));
+                        hash_bar_clone.inc(1);
                     }
                 }
             }
@@ -145,31 +159,24 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
 
-    loop {
-        match scan_rx.recv() {
-            Ok(file_path) => {
-                scan_spinner.tick();
+    while let Ok(file_path) = scan_rx.recv() {
+        scan_spinner.tick();
 
-                if let Ok(metadata) = std::fs::metadata(&file_path) {
-                    let size = metadata.len();
-                    let entry = size_map.entry(size).or_default();
-                    let len_before = entry.len();
-                    entry.push(file_path.clone());
+        if let Ok(metadata) = std::fs::metadata(&file_path) {
+            let size = metadata.len();
+            let entry = size_map.entry(size).or_default();
+            let len_before = entry.len();
+            entry.push(file_path.clone());
 
-                    if len_before == 1 {
-                        if let Some(first_file) = entry.get(0).cloned() {
-                            let _ = hash_task_tx.send(first_file);
-                        }
-                        let _ = hash_task_tx.send(file_path);
-                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
-                    } else if len_before > 1 {
-                        let _ = hash_task_tx.send(file_path);
-                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
-                    }
+            if len_before == 1 {
+                if let Some(first_file) = entry.first().cloned() {
+                    let _ = hash_task_tx.send(first_file);
                 }
-            }
-            Err(_) => {
-                break;
+                let _ = hash_task_tx.send(file_path);
+                hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
+            } else if len_before > 1 {
+                let _ = hash_task_tx.send(file_path);
+                hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
             }
         }
     }
@@ -213,35 +220,55 @@ fn dedupe_groups(
     let mut warn_reflink_unsupported = |name: &str| {
         if !reflink_warning_shown {
             println!("\n{}", "━".repeat(80).yellow());
-            println!("{} Filesystem Does Not Support Copy-on-Write Reflinks", "[WARNING]".bold().yellow());
+            println!(
+                "{} Filesystem Does Not Support Copy-on-Write Reflinks",
+                "[WARNING]".bold().yellow()
+            );
             println!("{}", "━".repeat(80).yellow());
             println!("\nYour filesystem does not support CoW (Copy-on-Write) reflinks.");
-            println!("Reflinks allow files to share disk space while remaining independent copies.");
-            println!("When you modify a reflinked file, only the changed portions use new disk space.\n");
+            println!(
+                "Reflinks allow files to share disk space while remaining independent copies."
+            );
+            println!(
+                "When you modify a reflinked file, only the changed portions use new disk space.\n"
+            );
             println!("{}", "Key differences:".bold());
-            println!("  • Reflinks: Different inodes, individual metadata, copy-on-write protection");
+            println!(
+                "  • Reflinks: Different inodes, individual metadata, copy-on-write protection"
+            );
             println!("  • Hard links: Shared inode, shared metadata, direct data sharing\n");
             println!("{}", "Implications:".bold());
-            println!("  • With hard links, modifying any file affects all linked copies and the vault master");
+            println!(
+                "  • With hard links, modifying any file affects all linked copies and the vault master"
+            );
             println!("  • All hard-linked files share the same timestamps and permissions");
             println!("  • Hard links save disk space but require careful file handling\n");
             println!("{}", "Your options:".bold());
-            println!("  1. {} - Files will be skipped (safe default)", "Do nothing".green());
-            println!("  2. {} - Enables deduplication with shared metadata", "Add --allow-unsafe-hardlinks".yellow());
-            println!("  3. {} - Btrfs, XFS (Linux), APFS (macOS), ReFS (Windows)\n", "Switch to a reflink-capable filesystem".cyan());
+            println!(
+                "  1. {} - Files will be skipped (safe default)",
+                "Do nothing".green()
+            );
+            println!(
+                "  2. {} - Enables deduplication with shared metadata",
+                "Add --allow-unsafe-hardlinks".yellow()
+            );
+            println!(
+                "  3. {} - Btrfs, XFS (Linux), APFS (macOS), ReFS (Windows)\n",
+                "Switch to a reflink-capable filesystem".cyan()
+            );
             println!("{}", "━".repeat(80).yellow());
             println!();
             reflink_warning_shown = true;
         }
         println!("{} {}", "[SKIPPED]".bold().red(), name);
     };
-    
+
     for (hash, paths) in groups {
         if paths.len() < 2 {
             continue;
         }
         let master = &paths[0];
-        
+
         let vault_path = if dry_run {
             let theoretical_path = vault::shard_path(hash)?;
             let name = display_name(master);
@@ -255,16 +282,13 @@ fn dedupe_groups(
         } else {
             vault::ensure_in_vault(hash, master)?
         };
-        
+
         let mut master_verified = false;
         if paranoid && !dry_run && master.exists() {
             match dedupe::compare_files(&vault_path, master) {
                 Ok(true) => master_verified = true,
                 Ok(false) => {
-                    eprintln!(
-                        "HASH COLLISION OR BIT ROT DETECTED: {}",
-                        master.display()
-                    );
+                    eprintln!("HASH COLLISION OR BIT ROT DETECTED: {}", master.display());
                     continue;
                 }
                 Err(err) => {
@@ -273,14 +297,14 @@ fn dedupe_groups(
                 }
             }
         }
-        
+
         if paranoid && dry_run {
             println!(
                 "{} Skipping paranoid verification (master not in vault)",
                 "[DRY RUN]".yellow().dimmed()
             );
         }
-        
+
         if !dry_run {
             match dedupe::replace_with_link(&vault_path, master, allow_unsafe_hardlinks) {
                 Ok(Some(link_type)) => {
@@ -356,10 +380,7 @@ fn dedupe_groups(
                 match dedupe::compare_files(&vault_path, path) {
                     Ok(true) => verified = true,
                     Ok(false) => {
-                        eprintln!(
-                            "HASH COLLISION OR BIT ROT DETECTED: {}",
-                            path.display()
-                        );
+                        eprintln!("HASH COLLISION OR BIT ROT DETECTED: {}", path.display());
                         continue;
                     }
                     Err(err) => {
@@ -368,7 +389,7 @@ fn dedupe_groups(
                     }
                 }
             }
-            
+
             if !dry_run {
                 match dedupe::replace_with_link(&vault_path, path, allow_unsafe_hardlinks) {
                     Ok(Some(link_type)) => {
@@ -427,7 +448,7 @@ fn dedupe_groups(
                 );
             }
         }
-        
+
         if !dry_run {
             state.set_cas_refcount(hash, paths.len() as u64)?;
         } else {
@@ -514,7 +535,7 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
 
         let inode = metadata.ino();
         let size = metadata.len();
-        
+
         let mut needs_restore = false;
         let mut target_hash: Option<Hash> = None;
 
@@ -523,62 +544,64 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
             if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
                 target_hash = Some(file_meta.hash);
             }
-        } 
-        else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
-            if let Ok(vault_path) = vault::shard_path(&file_meta.hash) {
-                if vault_path.exists() {
-                    needs_restore = true;
-                    target_hash = Some(file_meta.hash);
-                }
-            }
+        } else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path)
+            && let Ok(vault_path) = vault::shard_path(&file_meta.hash)
+            && vault_path.exists()
+        {
+            needs_restore = true;
+            target_hash = Some(file_meta.hash);
         }
 
         if needs_restore {
             let name = display_name(&file_path);
             restore_spinner.set_message(format!("Restoring {name}..."));
-            
+
             if dry_run {
                 println!("{} Would restore: {}", "[DRY RUN]".yellow().dimmed(), name);
                 if let Some(hash) = target_hash {
-                    println!("{}   -> Would decrement refcount for {}", "[DRY RUN]".yellow().dimmed(), crate::types::hash_to_hex(&hash));
+                    println!(
+                        "{}   -> Would decrement refcount for {}",
+                        "[DRY RUN]".yellow().dimmed(),
+                        crate::types::hash_to_hex(&hash)
+                    );
                 }
                 restored_count += 1;
                 bytes_restored += size;
-            } else {
-                if dedupe::restore_file(&file_path).is_ok() {
-                    println!("{} {}", "[RESTORED]".bold().cyan(), name);
-                    
-                    let _ = state.unmark_inode_vaulted(inode);
-                    let _ = state.remove_file_from_index(&file_path);
+            } else if dedupe::restore_file(&file_path).is_ok() {
+                println!("{} {}", "[RESTORED]".bold().cyan(), name);
 
-                    if let Some(hash) = target_hash {
-                        if let Ok(mut current_refcount) = state.get_cas_refcount(&hash) {
-                            if current_refcount > 0 {
-                                current_refcount -= 1;
-                                if current_refcount == 0 {
-                                    let _ = vault::remove_from_vault(&hash);
-                                    let _ = state.remove_cas_refcount(&hash);
-                                    println!("{}    -> Vault copy pruned (refcount 0)", "[GC]".bold().magenta());
-                                } else {
-                                    let _ = state.set_cas_refcount(&hash, current_refcount);
-                                }
-                            }
-                        }
+                let _ = state.unmark_inode_vaulted(inode);
+                let _ = state.remove_file_from_index(&file_path);
+
+                if let Some(hash) = target_hash
+                    && let Ok(mut current_refcount) = state.get_cas_refcount(&hash)
+                    && current_refcount > 0
+                {
+                    current_refcount -= 1;
+                    if current_refcount == 0 {
+                        let _ = vault::remove_from_vault(&hash);
+                        let _ = state.remove_cas_refcount(&hash);
+                        println!(
+                            "{}    -> Vault copy pruned (refcount 0)",
+                            "[GC]".bold().magenta()
+                        );
+                    } else {
+                        let _ = state.set_cas_refcount(&hash, current_refcount);
                     }
-
-                    restored_count += 1;
-                    bytes_restored += size;
-                } else {
-                    eprintln!("{} Failed to restore {name}", "[ERROR]".bold().red());
                 }
+
+                restored_count += 1;
+                bytes_restored += size;
+            } else {
+                eprintln!("{} Failed to restore {name}", "[ERROR]".bold().red());
             }
         }
     }
 
     restore_spinner.finish_and_clear();
     println!(
-        "Restore complete. Files restored: {} ({:.2} MB)", 
-        restored_count, 
+        "Restore complete. Files restored: {} ({:.2} MB)",
+        restored_count,
         bytes_restored as f64 / 1_048_576.0
     );
     Ok(())
