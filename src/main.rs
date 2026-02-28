@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::state::DbOp;
 use crate::types::{FileMetadata, Hash};
 
 #[derive(Parser, Debug)]
@@ -116,6 +117,8 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     let (result_tx, result_rx) = channel::unbounded::<(Hash, PathBuf)>();
 
+    let (db_tx, db_rx) = channel::unbounded::<DbOp>();
+
     let state_clone = state.clone();
     let num_workers = std::cmp::min(rayon::current_num_threads(), 8);
     let mut worker_handles = vec![];
@@ -123,6 +126,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     for _ in 0..num_workers {
         let rx = hash_task_rx.clone();
         let tx = result_tx.clone();
+        let db_ops_tx = db_tx.clone();
         let state_ref = state_clone.clone();
         let hash_bar_clone = hash_bar.clone();
 
@@ -146,7 +150,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
                             modified,
                             hash: full_hash,
                         };
-                        let _ = state_ref.upsert_file(&file_path, &file_metadata);
+                        let _ = db_ops_tx.send(DbOp::UpsertFile(file_path.clone(), file_metadata));
                         let _ = tx.send((full_hash, file_path));
                         hash_bar_clone.inc(1);
                     }
@@ -156,6 +160,11 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
         worker_handles.push(handle);
     }
+
+    let state_db_writer = state_clone.clone();
+    let db_writer_handle = std::thread::spawn(move || {
+        state_db_writer.batch_write_from_channel(db_rx);
+    });
 
     let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
 
@@ -192,6 +201,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     }
 
     drop(result_tx);
+    drop(db_tx);
 
     let mut results: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
     while let Ok((hash, path)) = result_rx.recv() {
@@ -200,10 +210,16 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     hash_bar.finish_and_clear();
 
+    let _ = db_writer_handle.join();
+
+    let mut refcount_ops = Vec::new();
     for (hash, paths) in &results {
         if paths.len() > 1 {
-            state.set_cas_refcount(hash, paths.len() as u64)?;
+            refcount_ops.push(DbOp::SetCasRefcount(*hash, paths.len() as u64));
         }
+    }
+    if !refcount_ops.is_empty() {
+        state.batch_write(refcount_ops)?;
     }
 
     Ok(results)
@@ -216,6 +232,7 @@ fn dedupe_groups(
     dry_run: bool,
     allow_unsafe_hardlinks: bool,
 ) -> Result<()> {
+    let mut global_db_ops = Vec::new();
     let mut reflink_warning_shown = false;
     let mut warn_reflink_unsupported = |name: &str| {
         if !reflink_warning_shown {
@@ -305,12 +322,14 @@ fn dedupe_groups(
             );
         }
 
+        let mut db_ops = Vec::new();
+
         if !dry_run {
             match dedupe::replace_with_link(&vault_path, master, allow_unsafe_hardlinks) {
                 Ok(Some(link_type)) => {
                     if link_type == dedupe::LinkType::HardLink {
                         let inode = std::fs::metadata(master)?.ino();
-                        state.mark_inode_vaulted(inode)?;
+                        db_ops.push(DbOp::MarkInodeVaulted(inode));
                     }
                     if !is_temp_file(master) {
                         let name = display_name(master);
@@ -395,7 +414,7 @@ fn dedupe_groups(
                     Ok(Some(link_type)) => {
                         if link_type == dedupe::LinkType::HardLink {
                             let inode = std::fs::metadata(path)?.ino();
-                            state.mark_inode_vaulted(inode)?;
+                            db_ops.push(DbOp::MarkInodeVaulted(inode));
                         }
                         if !is_temp_file(path) {
                             let name = display_name(path);
@@ -450,7 +469,11 @@ fn dedupe_groups(
         }
 
         if !dry_run {
-            state.set_cas_refcount(hash, paths.len() as u64)?;
+            db_ops.push(DbOp::SetCasRefcount(*hash, paths.len() as u64));
+            global_db_ops.extend(db_ops);
+            if global_db_ops.len() >= 1000 {
+                state.batch_write(std::mem::take(&mut global_db_ops))?;
+            }
         } else {
             let hex = crate::types::hash_to_hex(hash);
             println!(
@@ -459,6 +482,10 @@ fn dedupe_groups(
                 hex
             );
         }
+    }
+
+    if !dry_run && !global_db_ops.is_empty() {
+        state.batch_write(global_db_ops)?;
     }
     Ok(())
 }
@@ -514,6 +541,7 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
 
     let mut restored_count = 0;
     let mut bytes_restored = 0;
+    let mut global_restore_ops = Vec::new();
 
     for entry in jwalk::WalkDir::new(path).into_iter() {
         let entry = match entry {
@@ -570,8 +598,10 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
             } else if dedupe::restore_file(&file_path).is_ok() {
                 println!("{} {}", "[RESTORED]".bold().cyan(), name);
 
-                let _ = state.unmark_inode_vaulted(inode);
-                let _ = state.remove_file_from_index(&file_path);
+                let mut restore_ops = vec![
+                    DbOp::UnmarkInodeVaulted(inode),
+                    DbOp::RemoveFileFromIndex(file_path.clone()),
+                ];
 
                 if let Some(hash) = target_hash
                     && let Ok(mut current_refcount) = state.get_cas_refcount(&hash)
@@ -580,14 +610,18 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                     current_refcount -= 1;
                     if current_refcount == 0 {
                         let _ = vault::remove_from_vault(&hash);
-                        let _ = state.remove_cas_refcount(&hash);
+                        restore_ops.push(DbOp::RemoveCasRefcount(hash));
                         println!(
                             "{}    -> Vault copy pruned (refcount 0)",
                             "[GC]".bold().magenta()
                         );
                     } else {
-                        let _ = state.set_cas_refcount(&hash, current_refcount);
+                        restore_ops.push(DbOp::SetCasRefcount(hash, current_refcount));
                     }
+                }
+                global_restore_ops.extend(restore_ops);
+                if global_restore_ops.len() >= 1000 {
+                    let _ = state.batch_write(std::mem::take(&mut global_restore_ops));
                 }
 
                 restored_count += 1;
@@ -596,6 +630,10 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                 eprintln!("{} Failed to restore {name}", "[ERROR]".bold().red());
             }
         }
+    }
+
+    if !global_restore_ops.is_empty() {
+        let _ = state.batch_write(global_restore_ops);
     }
 
     restore_spinner.finish_and_clear();
