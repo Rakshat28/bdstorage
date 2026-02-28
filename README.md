@@ -33,7 +33,7 @@ It employs a **Tiered Hashing Pipeline**:
 `bdstorage` was benchmarked against `jdupes` and `rmlint` using `hyperfine`. Tests were run on an ext4 filesystem with a cleared OS cache and a fresh state database before every run.
 
 **Arena 1: Massive Sparse Files (100MB files, 1-byte difference)**
-Because `bdstorage` uses a tiered sparse-hashing pipeline, it rejects large files with tiny differences almost instantly without reading the entire file.
+Because `bdstorage` uses a tiered sparse-hashing pipeline, it rejects large files with no differences almost instantly without reading the entire file.
 
 | Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
 |:---|---:|---:|---:|---:|
