@@ -28,6 +28,54 @@ It employs a **Tiered Hashing Pipeline**:
 3. **Full BLAKE3 Hashing (High Throughput):** Only files that pass the sparse hash check undergo a full BLAKE3 cryptographic hash using a high-performance 128KB buffer to confirm identical content.
 
 ---
+## Benchmarks vs. Competitors
+
+`bdstorage` was benchmarked against `jdupes` and `rmlint` using `hyperfine`. Tests were run on an ext4 filesystem with a cleared OS cache and a fresh state database before every run.
+
+**Arena 1: Massive Sparse Files (100MB files, 1-byte difference)**
+Because `bdstorage` uses a tiered sparse-hashing pipeline, it rejects large files with tiny differences almost instantly without reading the entire file.
+
+| Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
+|:---|---:|---:|---:|---:|
+| `bdstorage dedupe` | **87.0 ± 3.5** | 81.8 | 93.0 | **1.00** |
+| `jdupes -r` | 101.5 ± 5.0 | 96.8 | 115.0 | 1.17 ± 0.07 |
+| `rmlint` | 291.4 ± 28.4 | 265.0 | 345.9 | 3.35 ± 0.35 |
+
+**Arena 2: Deep Trees of Tiny Files (15,000 files across 100 directories)**
+Thanks to asynchronous database transaction batching and a multi-threaded `crossbeam` architecture, `bdstorage` efficiently manages massive source code and log directories while maintaining a persistent, highly-safe CAS vault.
+
+| Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
+|:---|---:|---:|---:|---:|
+| `bdstorage dedupe` | **211.9 ± 32.9** | 164.5 | 262.6 | **1.00** |
+| `rmlint` | 292.4 ± 22.4 | 280.9 | 355.5 | 1.38 ± 0.24 |
+| `jdupes -r` | 1454.4 ± 5.6 | 1446.6 | 1461.7 | 6.86 ± 1.07 |
+
+---
+
+### Reproducing the Benchmarks
+
+Transparency is critical. You can reproduce these exact numbers on your own machine using the scripts provided in the repository.
+
+1. Navigate to the benchmarks directory:
+   ```bash
+   cd benchmarks
+   ```
+2. Generate the exact testing arenas (Sparse Files and Deep Trees):
+   ```bash
+   ./setup_bench.sh
+   ```
+3. Run the `hyperfine` race (Example for Arena 3):
+   ```bash
+   hyperfine \
+     --warmup 1 \
+     --prepare 'rm -rf ~/.bdstorage && rm -rf /tmp/bench_data/arena_tiny/test && cp -r /tmp/bench_data/arena_tiny/pristine /tmp/bench_data/arena_tiny/test' \
+     '../target/release/bdstorage dedupe /tmp/bench_data/arena_tiny/test' \
+     'rmlint /tmp/bench_data/arena_tiny/test' \
+     'jdupes -r /tmp/bench_data/arena_tiny/test'
+   ```
+*(Note: Ensure you have `hyperfine`, `rmlint`, and `jdupes` installed on your system before running).*
+
+---
 
 ## How It Works (Architecture)
 

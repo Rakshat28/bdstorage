@@ -1,17 +1,30 @@
 use crate::types::{FileMetadata, Hash};
 use anyhow::{Context, Result};
+use crossbeam::channel::Receiver;
 use redb::{Database, TableDefinition};
 use std::path::{Path, PathBuf};
 
 const FILE_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("file_index");
 const CAS_INDEX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cas_index");
 const VAULTED_INODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaulted_inodes");
+const BATCH_SIZE: usize = 1000;
+
+#[derive(Clone, Debug)]
+pub enum DbOp {
+    UpsertFile(PathBuf, FileMetadata),
+    SetCasRefcount(Hash, u64),
+    MarkInodeVaulted(u64),
+    RemoveFileFromIndex(PathBuf),
+    UnmarkInodeVaulted(u64),
+    RemoveCasRefcount(Hash),
+}
 
 #[derive(Clone)]
 pub struct State {
     db: std::sync::Arc<Database>,
 }
 
+#[allow(dead_code)]
 impl State {
     pub fn open_default() -> Result<Self> {
         Self::open_default_impl(false)
@@ -206,6 +219,95 @@ impl State {
         }
         txn.commit().with_context(|| "commit cas index removal")?;
         Ok(())
+    }
+
+    pub fn batch_write(&self, ops: Vec<DbOp>) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+
+        let txn = self
+            .db
+            .begin_write()
+            .with_context(|| "begin batch write transaction")?;
+        {
+            for op in ops {
+                match op {
+                    DbOp::UpsertFile(path, metadata) => {
+                        let key = path.to_string_lossy().as_bytes().to_vec();
+                        let value = bincode::serialize(&metadata)
+                            .with_context(|| "serialize file metadata")?;
+                        let mut table = txn.open_table(FILE_INDEX)?;
+                        table.insert(key.as_slice(), value.as_slice())?;
+                    }
+                    DbOp::SetCasRefcount(hash, count) => {
+                        let key = hash.to_vec();
+                        let value = count.to_le_bytes().to_vec();
+                        let mut table = txn.open_table(CAS_INDEX)?;
+                        table.insert(key.as_slice(), value.as_slice())?;
+                    }
+                    DbOp::MarkInodeVaulted(inode) => {
+                        let key = inode.to_le_bytes();
+                        let value = 1u8;
+                        let mut table = txn.open_table(VAULTED_INODES)?;
+                        table.insert(key.as_slice(), std::slice::from_ref(&value))?;
+                    }
+                    DbOp::RemoveFileFromIndex(path) => {
+                        let key = path.to_string_lossy().as_bytes().to_vec();
+                        let mut table = txn.open_table(FILE_INDEX)?;
+                        table.remove(key.as_slice())?;
+                    }
+                    DbOp::UnmarkInodeVaulted(inode) => {
+                        let key = inode.to_le_bytes();
+                        let mut table = txn.open_table(VAULTED_INODES)?;
+                        table.remove(key.as_slice())?;
+                    }
+                    DbOp::RemoveCasRefcount(hash) => {
+                        let key = hash.to_vec();
+                        let mut table = txn.open_table(CAS_INDEX)?;
+                        table.remove(key.as_slice())?;
+                    }
+                }
+            }
+        }
+        txn.commit()
+            .with_context(|| "commit batch write transaction")?;
+        Ok(())
+    }
+
+    pub fn batch_write_from_channel(&self, rx: Receiver<DbOp>) {
+        let mut buffer = Vec::with_capacity(BATCH_SIZE);
+
+        loop {
+            buffer.clear();
+
+            for _ in 0..BATCH_SIZE {
+                match rx.try_recv() {
+                    Ok(op) => buffer.push(op),
+                    Err(_) => break,
+                }
+            }
+
+            if buffer.is_empty() {
+                match rx.recv() {
+                    Ok(op) => {
+                        buffer.push(op);
+
+                        while let Ok(op) = rx.try_recv() {
+                            buffer.push(op);
+                            if buffer.len() >= BATCH_SIZE {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if !buffer.is_empty() {
+                let _ = self.batch_write(std::mem::take(&mut buffer));
+            }
+        }
     }
 }
 
