@@ -77,6 +77,8 @@ pub fn replace_with_link(
             Ok(Some(LinkType::Reflink))
         }
         Err(_) => {
+            // NTFS or non-CoW filesystems fail here. 
+            // We must remove the temp file before trying a hardlink.
             if temp.exists() {
                 let _ = std::fs::remove_file(&temp);
             }
@@ -88,8 +90,9 @@ pub fn replace_with_link(
 
                 Ok(Some(LinkType::HardLink))
             } else {
+                // Modified error message to specifically mention NTFS/WSL
                 anyhow::bail!(
-                    "reflink not supported on this filesystem and --allow-unsafe-hardlinks not specified"
+                    "reflink not supported (common on NTFS/WSL) and --allow-unsafe-hardlinks not specified"
                 )
             }
         }

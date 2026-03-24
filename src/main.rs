@@ -238,11 +238,14 @@ fn dedupe_groups(
         if !reflink_warning_shown {
             println!("\n{}", "━".repeat(80).yellow());
             println!(
-                "{} Filesystem Does Not Support Copy-on-Write Reflinks",
+                "{} Filesystem (NTFS/WSL) Does Not Support Copy-on-Write Reflinks",
                 "[WARNING]".bold().yellow()
             );
             println!("{}", "━".repeat(80).yellow());
             println!("\nYour filesystem does not support CoW (Copy-on-Write) reflinks.");
+            println!(
+                "This is expected on NTFS drives or when running via WSL on a Windows host."
+            );
             println!(
                 "Reflinks allow files to share disk space while remaining independent copies."
             );
@@ -266,7 +269,7 @@ fn dedupe_groups(
                 "Do nothing".green()
             );
             println!(
-                "  2. {} - Enables deduplication with shared metadata",
+                "  2. {} - Enables deduplication via hard links (Required for NTFS)",
                 "Add --allow-unsafe-hardlinks".yellow()
             );
             println!(
