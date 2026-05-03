@@ -247,9 +247,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
                     }
 
                     let size = metadata.len();
-                    if let Ok(_) = hasher::sparse_hash(&file_path, size)
-                        && let Ok(full_hash) = hasher::full_hash(&file_path)
-                    {
+                    if let Ok(full_hash) = hasher::full_hash(&file_path) {
                         let modified = file_modified(&file_path).unwrap_or(0);
                         let file_metadata = FileMetadata {
                             size,

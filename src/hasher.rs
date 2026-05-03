@@ -7,6 +7,7 @@ use std::path::Path;
 const SPARSE_CHUNK: usize = 4 * 1024;
 const SPARSE_TOTAL: u64 = 12 * 1024;
 const FULL_BUF: usize = 128 * 1024;
+const MMAP_THRESHOLD: u64 = 1024 * 1024;
 
 pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
     if size <= SPARSE_TOTAL {
@@ -35,9 +36,29 @@ pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
 
 pub fn full_hash(path: &Path) -> Result<Hash> {
     let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("read metadata {:?}", path))?
+        .len();
+
+    if len == 0 {
+        return Ok(blake3::hash(b"").into());
+    }
+
+    #[cfg(unix)]
+    if len >= MMAP_THRESHOLD {
+        // SAFETY: The file may be modified by another process while it is mapped.
+        // bdstorage operates on user-owned files not expected to be concurrently
+        // written. In the worst case a concurrent write produces a stale hash that
+        // the next scan will correct. The mapped region is used as a read-only
+        // &[u8] slice by BLAKE3, so no Rust memory-safety invariant is violated.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .with_context(|| format!("mmap file {:?}", path))?;
+        return Ok(blake3::hash(&mmap[..]).into());
+    }
+
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; FULL_BUF];
-
     loop {
         let read = file.read(&mut buffer).with_context(|| "read file")?;
         if read == 0 {
@@ -45,7 +66,22 @@ pub fn full_hash(path: &Path) -> Result<Hash> {
         }
         hasher.update(&buffer[..read]);
     }
+    Ok(hasher.finalize().into())
+}
 
+/// Always uses the 128 KB BufReader loop, regardless of file size.
+/// Exposed for benchmarking so the mmap and buffered paths can be compared directly.
+pub(crate) fn full_hash_buffered(path: &Path) -> Result<Hash> {
+    let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; FULL_BUF];
+    loop {
+        let read = file.read(&mut buffer).with_context(|| "read file")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(hasher.finalize().into())
 }
 
@@ -115,4 +151,45 @@ fn adjust_offset_for_sparse(file: &File, target: u64, _file_size: u64) -> u64 {
 #[cfg(not(target_os = "linux"))]
 fn adjust_offset_for_sparse(_file: &File, target: u64, _file_size: u64) -> u64 {
     target
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn empty_file_produces_blake3_empty_hash() {
+        let f = NamedTempFile::new().unwrap();
+        let got = full_hash(f.path()).unwrap();
+        let want: Hash = blake3::hash(b"").into();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn buffered_and_mmap_paths_agree() {
+        // File size is above MMAP_THRESHOLD so the mmap branch is exercised on Unix.
+        // On non-Unix the buffered path runs for both; the assertion still holds.
+        let data = vec![0x5Au8; (MMAP_THRESHOLD + 4096) as usize];
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+
+        let got = full_hash(f.path()).unwrap();
+        let want: Hash = blake3::hash(&data).into();
+        assert_eq!(got, want, "mmap and reference hash must match");
+    }
+
+    #[test]
+    fn small_file_below_mmap_threshold_is_correct() {
+        let data = b"hello bdstorage";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(data).unwrap();
+        f.flush().unwrap();
+
+        let got = full_hash(f.path()).unwrap();
+        let want: Hash = blake3::hash(data).into();
+        assert_eq!(got, want);
+    }
 }

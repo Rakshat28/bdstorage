@@ -18,6 +18,7 @@ path = "src/main.rs"
 anyhow = "1"
 blake3 = "1"
 bincode = "1"
+memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
 colored = "2"
 ctrlc = "3"
@@ -37,8 +38,13 @@ xattr = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.27", features = ["ioctl"] }
 
+[[bench]]
+name = "hash_bench"
+harness = false
+
 [dev-dependencies]
 assert_cmd = "2"
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 predicates = "3"
 walkdir = "2"
