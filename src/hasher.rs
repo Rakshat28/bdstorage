@@ -4,11 +4,14 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+#[allow(dead_code)]
 const SPARSE_CHUNK: usize = 4 * 1024;
+#[allow(dead_code)]
 const SPARSE_TOTAL: u64 = 12 * 1024;
 const FULL_BUF: usize = 128 * 1024;
 const MMAP_THRESHOLD: u64 = 1024 * 1024;
 
+#[allow(dead_code)]
 pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
     if size <= SPARSE_TOTAL {
         return full_hash(path);
@@ -47,14 +50,15 @@ pub fn full_hash(path: &Path) -> Result<Hash> {
 
     #[cfg(unix)]
     if len >= MMAP_THRESHOLD {
-        // SAFETY: The file may be modified by another process while it is mapped.
-        // bdstorage operates on user-owned files not expected to be concurrently
-        // written. In the worst case a concurrent write produces a stale hash that
-        // the next scan will correct. The mapped region is used as a read-only
-        // &[u8] slice by BLAKE3, so no Rust memory-safety invariant is violated.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }
-            .with_context(|| format!("mmap file {:?}", path))?;
-        return Ok(blake3::hash(&mmap[..]).into());
+        // SAFETY: The mapped region is passed as a read-only &[u8] to BLAKE3; no
+        // Rust memory-safety invariant is violated. A concurrent external truncation
+        // could theoretically cause SIGBUS when accessing the now-invalid pages, but
+        // bdstorage operates on user-owned files not expected to be modified during
+        // a scan. If mapping fails for any reason (e.g. ENOMEM, unsupported fs) we
+        // fall through to the chunked-read path so no file is silently dropped.
+        if let Ok(mmap) = unsafe { memmap2::Mmap::map(&file) } {
+            return Ok(blake3::hash(&mmap[..]).into());
+        }
     }
 
     let mut hasher = blake3::Hasher::new();
@@ -69,9 +73,9 @@ pub fn full_hash(path: &Path) -> Result<Hash> {
     Ok(hasher.finalize().into())
 }
 
-/// Always uses the 128 KB BufReader loop, regardless of file size.
-/// Exposed for benchmarking so the mmap and buffered paths can be compared directly.
-pub(crate) fn full_hash_buffered(path: &Path) -> Result<Hash> {
+/// Always uses the 128 KB chunked read loop, regardless of file size.
+/// Exposed for benchmarking so the mmap and chunked-read paths can be compared directly.
+pub fn full_hash_buffered(path: &Path) -> Result<Hash> {
     let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; FULL_BUF];
