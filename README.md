@@ -286,10 +286,17 @@ Check the **link count** column (the number after permissions):
 
 ## Data Locations & Storage
 
-Your data never leaves your machine. `bdstorage` uses **`$HOME/.imprint/`** (from the **`HOME`** environment variable):
+Your data never leaves your machine. By default, `bdstorage` uses **`$HOME/.imprint/`**:
 
 * **State DB:** `~/.imprint/state.redb`
 * **CAS Vault:** `~/.imprint/store/`
+
+### Configurable Vault Path
+You can override the default storage location using:
+* **Global Flag:** `bdstorage --vault-dir /path/to/custom/vault dedupe ...`
+* **Environment Variable:** `export BDSTORAGE_VAULT=/path/to/custom/vault`
+
+When a custom path is provided, the database will be stored as `state.redb` and the vault as `store/` directly inside that directory.
 
 To perform a completely clean reset of the engine:
 ```bash

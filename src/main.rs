@@ -31,6 +31,8 @@ use crate::types::{FileMetadata, Hash};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    #[arg(long, env = "BDSTORAGE_VAULT", global = true)]
+    vault_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -106,19 +108,19 @@ fn run() -> Result<()> {
 
     match args.command {
         Commands::Scan { path } => {
-            let state = state::State::open_default()?;
+            let state = state::State::open_default(args.vault_dir.clone())?;
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
         Commands::Dedupe(opts) => {
-            let summary = run_dedupe_once(&opts)?;
+            let summary = run_dedupe_once(&opts, args.vault_dir.clone())?;
             println!(
                 "dedupe complete. duplicate groups: {} files linked: {}",
                 summary.duplicate_groups, summary.files_linked
             );
         }
         Commands::Daemon { command } => match command {
-            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs)?,
+            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs, args.vault_dir.clone())?,
             DaemonCommand::Install(opts) => systemd::install_daemon_service(
                 &opts.target,
                 opts.interval_secs,
@@ -127,22 +129,22 @@ fn run() -> Result<()> {
         },
         Commands::Restore { path, dry_run } => {
             let state = if dry_run {
-                state::State::open_readonly_if_exists()?
+                state::State::open_readonly_if_exists(args.vault_dir.clone())?
             } else {
-                state::State::open_default()?
+                state::State::open_default(args.vault_dir.clone())?
             };
-            restore_pipeline(&path, &state, dry_run)?;
+            restore_pipeline(&path, &state, dry_run, args.vault_dir.clone())?;
         }
     }
 
     Ok(())
 }
 
-fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
+fn run_dedupe_once(opts: &DedupeOptions, vault_dir: Option<PathBuf>) -> Result<DedupeRunSummary> {
     let state = if opts.dry_run {
-        state::State::open_readonly_if_exists()?
+        state::State::open_readonly_if_exists(vault_dir.clone())?
     } else {
-        state::State::open_default()?
+        state::State::open_default(vault_dir.clone())?
     };
     let groups = scan_pipeline(&opts.path, &state)?;
     dedupe_groups(
@@ -151,10 +153,11 @@ fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
         opts.paranoid,
         opts.dry_run,
         opts.allow_unsafe_hardlinks,
+        vault_dir,
     )
 }
 
-fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
+fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: Option<PathBuf>) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(1);
     ctrlc::set_handler(move || {
         let _ = shutdown_tx.try_send(());
@@ -174,7 +177,7 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
 
         println!("[daemon] run #{run_no} started");
         let started = std::time::Instant::now();
-        match run_dedupe_once(&opts) {
+        match run_dedupe_once(&opts, vault_dir.clone()) {
             Ok(summary) => {
                 println!(
                     "[daemon] run #{run_no} complete in {:.2}s; duplicate_groups={} files_linked={}",
@@ -337,6 +340,7 @@ fn dedupe_groups(
     paranoid: bool,
     dry_run: bool,
     allow_unsafe_hardlinks: bool,
+    vault_dir: Option<PathBuf>,
 ) -> Result<DedupeRunSummary> {
     let mut global_db_ops = Vec::new();
     let mut files_linked = 0usize;
@@ -395,7 +399,7 @@ fn dedupe_groups(
         let master = &paths[0];
 
         let vault_path = if dry_run {
-            let theoretical_path = vault::shard_path(hash)?;
+            let theoretical_path = vault::shard_path(hash, vault_dir.clone())?;
             let name = display_name(master);
             println!(
                 "{} Would move master: {} -> {}",
@@ -405,7 +409,7 @@ fn dedupe_groups(
             );
             theoretical_path
         } else {
-            vault::ensure_in_vault(hash, master)?
+            vault::ensure_in_vault(hash, master, vault_dir.clone())?
         };
 
         let mut master_verified = false;
@@ -644,7 +648,7 @@ fn print_summary(mode: &str, groups: &HashMap<Hash, Vec<PathBuf>>) {
     println!("{mode} complete. duplicate groups: {duplicates}");
 }
 
-fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<()> {
+fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool, vault_dir: Option<PathBuf>) -> Result<()> {
     let multi = MultiProgress::new();
     let restore_spinner = multi.add(ProgressBar::new_spinner());
     restore_spinner.set_style(
@@ -688,7 +692,7 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                 target_hash = Some(file_meta.hash);
             }
         } else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path)
-            && let Ok(vault_path) = vault::shard_path(&file_meta.hash)
+            && let Ok(vault_path) = vault::shard_path(&file_meta.hash, vault_dir.clone())
             && vault_path.exists()
         {
             needs_restore = true;
@@ -724,7 +728,7 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                 {
                     current_refcount -= 1;
                     if current_refcount == 0 {
-                        let _ = vault::remove_from_vault(&hash);
+                        let _ = vault::remove_from_vault(&hash, vault_dir.clone());
                         restore_ops.push(DbOp::RemoveCasRefcount(hash));
                         println!(
                             "{}    -> Vault copy pruned (refcount 0)",

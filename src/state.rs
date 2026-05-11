@@ -26,16 +26,19 @@ pub struct State {
 
 #[allow(dead_code)]
 impl State {
-    pub fn open_default() -> Result<Self> {
-        Self::open_default_impl(false)
+    pub fn open_default(custom_path: Option<PathBuf>) -> Result<Self> {
+        Self::open_default_impl(false, custom_path)
     }
 
-    pub fn open_readonly_if_exists() -> Result<Self> {
-        let db_path = default_db_path()?;
+    pub fn open_readonly_if_exists(custom_path: Option<PathBuf>) -> Result<Self> {
+        let db_path = match custom_path {
+            Some(ref p) => p.join("state.redb"),
+            None => default_db_path()?,
+        };
         if !db_path.exists() {
             return Self::create_dummy();
         }
-        Self::open_default_impl(true)
+        Self::open_default_impl(true, custom_path)
     }
 
     fn create_dummy() -> Result<Self> {
@@ -55,8 +58,11 @@ impl State {
         })
     }
 
-    fn open_default_impl(readonly: bool) -> Result<Self> {
-        let db_path = default_db_path()?;
+    fn open_default_impl(readonly: bool, custom_path: Option<PathBuf>) -> Result<Self> {
+        let db_path = match custom_path {
+            Some(p) => p.join("state.redb"),
+            None => default_db_path()?,
+        };
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create state directory {:?}", parent))?;

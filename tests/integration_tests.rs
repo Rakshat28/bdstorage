@@ -377,3 +377,35 @@ fn test_dry_run_no_changes() {
         "Entire .imprint directory (vault and database) must not exist in dry-run mode"
     );
 }
+
+#[test]
+fn test_custom_vault_path() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    let custom_vault = home.join("custom_vault");
+    fs::create_dir(&target).expect("Failed to create target directory");
+    fs::create_dir(&custom_vault).expect("Failed to create custom vault directory");
+
+    create_file_with_content(&target, "file1.txt", b"custom vault content");
+    create_file_with_content(&target, "file2.txt", b"custom vault content");
+
+    let mut dedupe_cmd = run_cmd(home, &[
+        "--vault-dir", &custom_vault.to_string_lossy(),
+        "dedupe", &target.to_string_lossy()
+    ]);
+    dedupe_cmd.assert().success();
+
+    // Verify vault and DB exist in custom location
+    assert!(custom_vault.join("store").exists(), "Vault store should be in custom location");
+    assert!(custom_vault.join("state.redb").exists(), "State DB should be in custom location");
+
+    let mut restore_cmd = run_cmd(home, &[
+        "--vault-dir", &custom_vault.to_string_lossy(),
+        "restore", &target.to_string_lossy()
+    ]);
+    restore_cmd.assert().success();
+
+    let content = fs::read(target.join("file1.txt")).unwrap();
+    assert_eq!(content, b"custom vault content");
+}

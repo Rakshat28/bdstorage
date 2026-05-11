@@ -29,21 +29,24 @@ impl Drop for TempCleanup {
     }
 }
 
-pub fn vault_root() -> Result<PathBuf> {
+pub fn vault_root(custom_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = custom_path {
+        return Ok(p.join("store"));
+    }
     let home = std::env::var("HOME").with_context(|| "HOME not set")?;
     Ok(PathBuf::from(home).join(".imprint").join("store"))
 }
 
-pub fn shard_path(hash: &Hash) -> Result<PathBuf> {
+pub fn shard_path(hash: &Hash, custom_path: Option<PathBuf>) -> Result<PathBuf> {
     let hex = hash_to_hex(hash);
     let shard_a = &hex[0..2];
     let shard_b = &hex[2..4];
-    let root = vault_root()?;
+    let root = vault_root(custom_path)?;
     Ok(root.join(shard_a).join(shard_b).join(hex))
 }
 
-pub fn ensure_in_vault(hash: &Hash, src: &Path) -> Result<PathBuf> {
-    let dest = shard_path(hash)?;
+pub fn ensure_in_vault(hash: &Hash, src: &Path, custom_path: Option<PathBuf>) -> Result<PathBuf> {
+    let dest = shard_path(hash, custom_path.clone())?;
     if dest.exists() {
         return Ok(dest);
     }
@@ -81,8 +84,8 @@ pub fn ensure_in_vault(hash: &Hash, src: &Path) -> Result<PathBuf> {
     Ok(dest)
 }
 
-pub fn remove_from_vault(hash: &Hash) -> Result<()> {
-    let dest = shard_path(hash)?;
+pub fn remove_from_vault(hash: &Hash, custom_path: Option<PathBuf>) -> Result<()> {
+    let dest = shard_path(hash, custom_path)?;
     if dest.exists() {
         std::fs::remove_file(&dest).with_context(|| "remove file from vault")?;
 
