@@ -31,6 +31,8 @@ use crate::types::{FileMetadata, Hash};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -104,21 +106,26 @@ fn main() {
 fn run() -> Result<()> {
     let args = Cli::parse();
 
+    if args.quiet {
+        // We can't easily suppress all stdout if it's already used for plumbing,
+        // but we can ensure progress bars are hidden.
+    }
+
     match args.command {
         Commands::Scan { path } => {
             let state = state::State::open_default()?;
-            let groups = scan_pipeline(&path, &state)?;
+            let groups = scan_pipeline(&path, &state, args.quiet)?;
             print_summary("scan", &groups);
         }
         Commands::Dedupe(opts) => {
-            let summary = run_dedupe_once(&opts)?;
+            let summary = run_dedupe_once(&opts, args.quiet)?;
             println!(
                 "dedupe complete. duplicate groups: {} files linked: {}",
                 summary.duplicate_groups, summary.files_linked
             );
         }
         Commands::Daemon { command } => match command {
-            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs)?,
+            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs, args.quiet)?,
             DaemonCommand::Install(opts) => systemd::install_daemon_service(
                 &opts.target,
                 opts.interval_secs,
@@ -138,13 +145,13 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
+fn run_dedupe_once(opts: &DedupeOptions, quiet: bool) -> Result<DedupeRunSummary> {
     let state = if opts.dry_run {
         state::State::open_readonly_if_exists()?
     } else {
         state::State::open_default()?
     };
-    let groups = scan_pipeline(&opts.path, &state)?;
+    let groups = scan_pipeline(&opts.path, &state, quiet)?;
     dedupe_groups(
         &groups,
         &state,
@@ -154,7 +161,7 @@ fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
     )
 }
 
-fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
+fn run_daemon(opts: DedupeOptions, interval_secs: u64, quiet: bool) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(1);
     ctrlc::set_handler(move || {
         let _ = shutdown_tx.try_send(());
@@ -174,7 +181,7 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
 
         println!("[daemon] run #{run_no} started");
         let started = std::time::Instant::now();
-        match run_dedupe_once(&opts) {
+        match run_dedupe_once(&opts, quiet) {
             Ok(summary) => {
                 println!(
                     "[daemon] run #{run_no} complete in {:.2}s; duplicate_groups={} files_linked={}",
@@ -202,9 +209,13 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
     Ok(())
 }
 
-fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<PathBuf>>> {
+fn scan_pipeline(path: &Path, state: &state::State, quiet: bool) -> Result<HashMap<Hash, Vec<PathBuf>>> {
     let multi = MultiProgress::new();
-    let scan_spinner = multi.add(ProgressBar::new_spinner());
+    let scan_spinner = if !state::is_terminal() || quiet {
+        ProgressBar::hidden()
+    } else {
+        multi.add(ProgressBar::new_spinner())
+    };
     scan_spinner.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner} {msg}")
@@ -212,7 +223,18 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     );
     scan_spinner.set_message("Scanning...");
 
-    let hash_bar = multi.add(progress("Indexing/Hashing", 0));
+    let hash_bar = if !state::is_terminal() || quiet {
+        ProgressBar::hidden()
+    } else {
+        multi.add(ProgressBar::new(0))
+    };
+    hash_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{prefix:>12.cyan.bold} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+            .unwrap()
+            .progress_chars("=>-")
+    );
+    hash_bar.set_prefix("Hashing");
 
     let (scan_tx, scan_rx) = channel::unbounded();
     let path_clone = path.to_path_buf();
@@ -248,7 +270,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
                     let size = metadata.len();
                     if let Ok(_) = hasher::sparse_hash(&file_path, size)
-                        && let Ok(full_hash) = hasher::full_hash(&file_path)
+                        && let Ok(full_hash) = hasher::full_hash(&file_path, Some(&hash_bar_clone))
                     {
                         let modified = file_modified(&file_path).unwrap_or(0);
                         let file_metadata = FileMetadata {
@@ -258,7 +280,6 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
                         };
                         let _ = db_ops_tx.send(DbOp::UpsertFile(file_path.clone(), file_metadata));
                         let _ = tx.send((full_hash, file_path));
-                        hash_bar_clone.inc(1);
                     }
                 }
             }
@@ -286,12 +307,15 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
             if len_before == 1 {
                 if let Some(first_file) = entry.first().cloned() {
                     let _ = hash_task_tx.send(first_file);
+                    if let Ok(m) = std::fs::metadata(&entry[0]) {
+                         hash_bar.set_length(hash_bar.length().unwrap_or(0) + m.len());
+                    }
                 }
                 let _ = hash_task_tx.send(file_path);
-                hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
+                hash_bar.set_length(hash_bar.length().unwrap_or(0) + size);
             } else if len_before > 1 {
                 let _ = hash_task_tx.send(file_path);
-                hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
+                hash_bar.set_length(hash_bar.length().unwrap_or(0) + size);
             }
         }
     }

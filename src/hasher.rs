@@ -32,18 +32,20 @@ pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
 
     Ok(hasher.finalize().into())
 }
-
-pub fn full_hash(path: &Path) -> Result<Hash> {
+pub fn full_hash(path: &Path, pb: Option<&indicatif::ProgressBar>) -> Result<Hash> {
     let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; FULL_BUF];
+    let mut buffer = [0u8; 64 * 1024];
 
     loop {
-        let read = file.read(&mut buffer).with_context(|| "read file")?;
-        if read == 0 {
+        let n = file.read(&mut buffer).with_context(|| "read file for hashing")?;
+        if n == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        hasher.update(&buffer[..n]);
+        if let Some(bar) = pb {
+            bar.inc(n as u64);
+        }
     }
 
     Ok(hasher.finalize().into())
