@@ -34,6 +34,35 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  xfs-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust caching
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install xfsprogs
+        run: sudo apt-get update && sudo apt-get install -y xfsprogs
+
+      - name: Create and mount XFS loopback device
+        run: |
+          truncate -s 512M xfs.img
+          sudo mkfs.xfs -m reflink=1 xfs.img
+          sudo mkdir /mnt/xfs
+          sudo mount -o loop xfs.img /mnt/xfs
+          sudo chmod 777 /mnt/xfs
+
+      - name: Run XFS integration tests
+        run: cargo test -- --test-threads=1
+        env:
+          BDSTORAGE_TEST_ROOT: /mnt/xfs
+          BDSTORAGE_TEST_XFS: 1
+
   coverage:
     runs-on: ubuntu-latest
     steps:
