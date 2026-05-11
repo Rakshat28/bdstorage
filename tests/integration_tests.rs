@@ -5,7 +5,15 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 fn setup_env() -> tempfile::TempDir {
-    tempfile::TempDir::new().expect("Failed to create temp directory")
+    if let Ok(root) = std::env::var("BDSTORAGE_TEST_ROOT") {
+        let root_path = PathBuf::from(root);
+        if !root_path.exists() {
+            fs::create_dir_all(&root_path).expect("Failed to create BDSTORAGE_TEST_ROOT");
+        }
+        tempfile::tempdir_in(root_path).expect("Failed to create temp directory in custom root")
+    } else {
+        tempfile::TempDir::new().expect("Failed to create temp directory")
+    }
 }
 
 fn create_random_file(dir: &Path, name: &str, size: usize) -> PathBuf {
@@ -375,5 +383,64 @@ fn test_dry_run_no_changes() {
     assert!(
         !imprint_dir.exists(),
         "Entire .imprint directory (vault and database) must not exist in dry-run mode"
+    );
+}
+
+#[test]
+fn test_ntfs_hardlink_fallback() {
+    // This test is intended to be run on a filesystem that does NOT support reflinks (e.g., NTFS)
+    if std::env::var("BDSTORAGE_TEST_NTFS").is_err() {
+        return;
+    }
+
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"ntfs fallback content");
+    create_file_with_content(&target, "file2.txt", b"ntfs fallback content");
+
+    // First, try without --allow-unsafe-hardlinks. It should skip/warn.
+    let mut dedupe_cmd_fail = run_cmd(home, &["dedupe", &target.to_string_lossy()]);
+    let output_fail = dedupe_cmd_fail.output().expect("Failed to run dedupe");
+    let stdout_fail = String::from_utf8_lossy(&output_fail.stdout);
+
+    assert!(
+        stdout_fail.contains("SKIPPED") || stdout_fail.contains("WARNING") || stdout_fail.contains("not support"),
+        "Should have warned about missing reflink support. Output:\n{}",
+        stdout_fail
+    );
+
+    // Now, try with --allow-unsafe-hardlinks.
+    let mut dedupe_cmd_pass = run_cmd(
+        home,
+        &[
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    let output_pass = dedupe_cmd_pass.output().expect("Failed to run dedupe");
+    let stdout_pass = String::from_utf8_lossy(&output_pass.stdout);
+
+    assert!(
+        output_pass.status.success(),
+        "Dedupe failed with hardlinks allowed: {}",
+        String::from_utf8_lossy(&output_pass.stderr)
+    );
+    assert!(
+        stdout_pass.contains("[HARDLINK]"),
+        "Should have used HARDLINK fallback. Output:\n{}",
+        stdout_pass
+    );
+
+    // Verify inodes are the same
+    let meta1 = fs::metadata(target.join("file1.txt")).unwrap();
+    let meta2 = fs::metadata(target.join("file2.txt")).unwrap();
+    assert_eq!(
+        meta1.ino(),
+        meta2.ino(),
+        "Hardlinked files must share the same inode"
     );
 }

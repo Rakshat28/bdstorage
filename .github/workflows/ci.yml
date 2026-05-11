@@ -34,6 +34,35 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  ntfs-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust caching
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ntfs-3g
+        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
+
+      - name: Create and mount NTFS loopback device
+        run: |
+          truncate -s 512M ntfs.img
+          sudo mkfs.ntfs -F ntfs.img
+          sudo mkdir /mnt/ntfs
+          sudo mount -t ntfs-3g -o loop ntfs.img /mnt/ntfs
+          sudo chmod 777 /mnt/ntfs
+
+      - name: Run NTFS integration tests
+        run: cargo test -- --test-threads=1
+        env:
+          BDSTORAGE_TEST_ROOT: /mnt/ntfs
+          BDSTORAGE_TEST_NTFS: 1
+
   coverage:
     runs-on: ubuntu-latest
     steps:
