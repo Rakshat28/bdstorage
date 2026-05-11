@@ -60,6 +60,11 @@ enum Commands {
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+    #[command(about = "Verify and repair consistency between the vault, database, and filesystem.")]
+    Fsck {
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,6 +137,14 @@ fn run() -> Result<()> {
                 state::State::open_default()?
             };
             restore_pipeline(&path, &state, dry_run)?;
+        }
+        Commands::Fsck { dry_run } => {
+            let state = if dry_run {
+                state::State::open_readonly_if_exists()?
+            } else {
+                state::State::open_default()?
+            };
+            run_fsck(&state, dry_run)?;
         }
     }
 
@@ -734,9 +747,10 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                         restore_ops.push(DbOp::SetCasRefcount(hash, current_refcount));
                     }
                 }
-                global_restore_ops.extend(restore_ops);
-                if global_restore_ops.len() >= 1000 {
-                    let _ = state.batch_write(std::mem::take(&mut global_restore_ops));
+                
+                // Immediate write for safety instead of batching
+                if !dry_run {
+                    state.batch_write(restore_ops)?;
                 }
 
                 restored_count += 1;
@@ -745,10 +759,6 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                 eprintln!("{} Failed to restore {name}", "[ERROR]".bold().red());
             }
         }
-    }
-
-    if !global_restore_ops.is_empty() {
-        let _ = state.batch_write(global_restore_ops);
     }
 
     restore_spinner.finish_and_clear();

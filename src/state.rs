@@ -309,6 +309,24 @@ impl State {
             }
         }
     }
+
+    pub fn list_all_files(&self) -> Result<Vec<(PathBuf, FileMetadata)>> {
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(FILE_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(err) => return Err(err.into()),
+        };
+
+        let mut results = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let path = PathBuf::from(String::from_utf8_lossy(key.value()).to_string());
+            let metadata: FileMetadata = bincode::deserialize(value.value())?;
+            results.push((path, metadata));
+        }
+        Ok(results)
+    }
 }
 
 pub fn default_db_path() -> Result<PathBuf> {
