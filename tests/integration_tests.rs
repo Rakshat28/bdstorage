@@ -5,7 +5,15 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 fn setup_env() -> tempfile::TempDir {
-    tempfile::TempDir::new().expect("Failed to create temp directory")
+    if let Ok(root) = std::env::var("BDSTORAGE_TEST_ROOT") {
+        let root_path = PathBuf::from(root);
+        if !root_path.exists() {
+            fs::create_dir_all(&root_path).expect("Failed to create BDSTORAGE_TEST_ROOT");
+        }
+        tempfile::tempdir_in(root_path).expect("Failed to create temp directory in custom root")
+    } else {
+        tempfile::TempDir::new().expect("Failed to create temp directory")
+    }
 }
 
 fn create_random_file(dir: &Path, name: &str, size: usize) -> PathBuf {
@@ -375,5 +383,48 @@ fn test_dry_run_no_changes() {
     assert!(
         !imprint_dir.exists(),
         "Entire .imprint directory (vault and database) must not exist in dry-run mode"
+    );
+}
+
+#[test]
+fn test_btrfs_reflink_validation() {
+    // This test is intended to be run on a Btrfs filesystem (e.g., in CI)
+    // We only run it if BDSTORAGE_TEST_BTRFS is set to avoid failures on other filesystems.
+    if std::env::var("BDSTORAGE_TEST_BTRFS").is_err() {
+        return;
+    }
+
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"reflink validation content");
+    create_file_with_content(&target, "file2.txt", b"reflink validation content");
+
+    let mut dedupe_cmd = run_cmd(home, &["dedupe", &target.to_string_lossy()]);
+    let output = dedupe_cmd.output().expect("Failed to run dedupe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "Dedupe failed on Btrfs: {}\nStdout: {}",
+        stderr,
+        stdout
+    );
+    assert!(
+        stdout.contains("[REFLINK ]"),
+        "Should have used REFLINK on Btrfs filesystem. Output:\n{}",
+        stdout
+    );
+
+    // Verify inodes are different (standard CoW reflink behavior)
+    let meta1 = fs::metadata(target.join("file1.txt")).unwrap();
+    let meta2 = fs::metadata(target.join("file2.txt")).unwrap();
+    assert_ne!(
+        meta1.ino(),
+        meta2.ino(),
+        "Reflinked files should have different inodes"
     );
 }

@@ -34,6 +34,35 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  btrfs-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust caching
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install btrfs-progs
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs
+
+      - name: Create and mount Btrfs loopback device
+        run: |
+          truncate -s 512M btrfs.img
+          mkfs.btrfs btrfs.img
+          sudo mkdir /mnt/btrfs
+          sudo mount -o loop btrfs.img /mnt/btrfs
+          sudo chmod 777 /mnt/btrfs
+
+      - name: Run Btrfs integration tests
+        run: cargo test -- --test-threads=1
+        env:
+          BDSTORAGE_TEST_ROOT: /mnt/btrfs
+          BDSTORAGE_TEST_BTRFS: 1
+
   coverage:
     runs-on: ubuntu-latest
     steps:
