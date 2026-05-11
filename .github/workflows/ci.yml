@@ -34,6 +34,37 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  nfs-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust caching
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install NFS server
+        run: sudo apt-get update && sudo apt-get install -y nfs-kernel-server
+
+      - name: Setup and mount NFS share
+        run: |
+          sudo mkdir -p /export/test
+          sudo chmod 777 /export/test
+          echo "/export/test 127.0.0.1(rw,sync,no_subtree_check)" | sudo tee /etc/exports
+          sudo systemctl restart nfs-kernel-server
+          sudo mkdir -p /mnt/nfs
+          sudo mount -t nfs 127.0.0.1:/export/test /mnt/nfs
+          sudo chmod 777 /mnt/nfs
+
+      - name: Run NFS integration tests
+        run: cargo test -- --test-threads=1
+        env:
+          BDSTORAGE_TEST_ROOT: /mnt/nfs
+          BDSTORAGE_TEST_NFS: 1
+
   coverage:
     runs-on: ubuntu-latest
     steps:

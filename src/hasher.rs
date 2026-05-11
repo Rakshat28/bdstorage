@@ -91,20 +91,24 @@ fn adjust_offset_for_sparse(file: &File, target: u64, _file_size: u64) -> u64 {
     fiemap_data.fm_length = u64::MAX;
     fiemap_data.fm_extent_count = 32;
 
-    if unsafe { fiemap(fd, &mut fiemap_data).is_ok() } {
-        let mapped = fiemap_data.fm_mapped_extents as usize;
-        if mapped > 0 {
-            for i in 0..mapped {
-                let extent = &fiemap_data.fm_extents[i];
-                let extent_start = extent.fe_logical;
-                let extent_end = extent_start + extent.fe_length;
+    if let Err(e) = unsafe { fiemap(fd, &mut fiemap_data) } {
+        // Explicitly handle the case where FIEMAP is not supported (common on network drives/SMB/NFS)
+        // We log nothing to avoid spamming, but we return the original target as a safe fallback.
+        return target;
+    }
 
-                if target >= extent_start && target < extent_end {
-                    return target;
-                }
-                if extent_start > target {
-                    return extent_start;
-                }
+    let mapped = fiemap_data.fm_mapped_extents as usize;
+    if mapped > 0 {
+        for i in 0..mapped {
+            let extent = &fiemap_data.fm_extents[i];
+            let extent_start = extent.fe_logical;
+            let extent_end = extent_start + extent.fe_length;
+
+            if target >= extent_start && target < extent_end {
+                return target;
+            }
+            if extent_start > target {
+                return extent_start;
             }
         }
     }

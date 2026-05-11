@@ -5,7 +5,15 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 fn setup_env() -> tempfile::TempDir {
-    tempfile::TempDir::new().expect("Failed to create temp directory")
+    if let Ok(root) = std::env::var("BDSTORAGE_TEST_ROOT") {
+        let root_path = PathBuf::from(root);
+        if !root_path.exists() {
+            fs::create_dir_all(&root_path).expect("Failed to create BDSTORAGE_TEST_ROOT");
+        }
+        tempfile::tempdir_in(root_path).expect("Failed to create temp directory in custom root")
+    } else {
+        tempfile::TempDir::new().expect("Failed to create temp directory")
+    }
 }
 
 fn create_random_file(dir: &Path, name: &str, size: usize) -> PathBuf {
@@ -376,4 +384,34 @@ fn test_dry_run_no_changes() {
         !imprint_dir.exists(),
         "Entire .imprint directory (vault and database) must not exist in dry-run mode"
     );
+}
+
+#[test]
+fn test_network_drive_robustness() {
+    // This test simulates behavior on a network drive (SMB/NFS) where reflinks fail
+    // and FIEMAP might not be supported.
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    // Create some duplicates
+    create_file_with_content(&target, "file1.txt", b"network drive content");
+    create_file_with_content(&target, "file2.txt", b"network drive content");
+
+    // On most systems, /tmp (or the temp dir) might not support reflinks depending on FS.
+    // If it DOES support reflinks, this test will just pass with reflinks.
+    // If it DOES NOT, it should fail cleanly or use hardlinks if allowed.
+    
+    let mut dedupe_cmd = run_cmd(home, &["dedupe", &target.to_string_lossy()]);
+    let output = dedupe_cmd.output().expect("Failed to run dedupe");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // If reflinks fail, it should NOT panic.
+    if output.status.success() {
+        assert!(stdout.contains("[REFLINK ]") || stdout.contains("[HARDLINK]"));
+    } else {
+        assert!(stderr.contains("reflink not supported") || stdout.contains("SKIPPED"));
+    }
 }
