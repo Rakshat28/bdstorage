@@ -143,7 +143,7 @@ cargo build --release
    bdstorage dedupe /path/to/tree -n    # dry-run: no writes
    bdstorage dedupe /path/to/tree       # real run
    ```
-4. **State and vault** are created under **`$HOME/.imprint/`** on first use ([Data Locations & Storage](#-data-locations--storage)).
+4. **State and vault** are created under **`$HOME/.imprint/`** on first use (overridable via `--vault-dir` or `$BDSTORAGE_VAULT`; see [Data Locations & Storage](#-data-locations--storage)).
 
 Use **`bdstorage --help`** and **`bdstorage <subcommand> --help`** for the full CLI.
 
@@ -293,10 +293,21 @@ Check the **link count** column (the number after permissions):
 
 ## Data Locations & Storage
 
-Your data never leaves your machine. `bdstorage` uses **`$HOME/.imprint/`** (from the **`HOME`** environment variable):
+Your data never leaves your machine. By default, `bdstorage` uses **`$HOME/.imprint/`**:
 
 * **State DB:** `~/.imprint/state.redb`
 * **CAS Vault:** `~/.imprint/store/`
+
+### Overriding the vault location
+
+You can point the vault and state DB at a different directory in two ways (listed in priority order):
+
+| Method | Example |
+|:---|:---|
+| CLI flag | `bdstorage --vault-dir /mnt/bigdisk dedupe ~/Downloads` |
+| Environment variable | `export BDSTORAGE_VAULT=/mnt/bigdisk` |
+
+Both `state.redb` and `store/` will be placed inside the chosen directory.
 
 To perform a completely clean reset of the engine:
 ```bash

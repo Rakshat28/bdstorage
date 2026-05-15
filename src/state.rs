@@ -26,16 +26,16 @@ pub struct State {
 
 #[allow(dead_code)]
 impl State {
-    pub fn open_default() -> Result<Self> {
-        Self::open_default_impl(false)
+    pub fn open_default(vault_dir: &Path) -> Result<Self> {
+        Self::open_default_impl(vault_dir, false)
     }
 
-    pub fn open_readonly_if_exists() -> Result<Self> {
-        let db_path = default_db_path()?;
+    pub fn open_readonly_if_exists(vault_dir: &Path) -> Result<Self> {
+        let db_path = db_path(vault_dir);
         if !db_path.exists() {
             return Self::create_dummy();
         }
-        Self::open_default_impl(true)
+        Self::open_default_impl(vault_dir, true)
     }
 
     fn create_dummy() -> Result<Self> {
@@ -55,8 +55,8 @@ impl State {
         })
     }
 
-    fn open_default_impl(readonly: bool) -> Result<Self> {
-        let db_path = default_db_path()?;
+    fn open_default_impl(vault_dir: &Path, readonly: bool) -> Result<Self> {
+        let db_path = db_path(vault_dir);
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create state directory {:?}", parent))?;
@@ -311,7 +311,6 @@ impl State {
     }
 }
 
-pub fn default_db_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").with_context(|| "HOME not set")?;
-    Ok(PathBuf::from(home).join(".imprint").join("state.redb"))
+pub fn db_path(vault_dir: &Path) -> PathBuf {
+    vault_dir.join("state.redb")
 }

@@ -377,3 +377,103 @@ fn test_dry_run_no_changes() {
         "Entire .imprint directory (vault and database) must not exist in dry-run mode"
     );
 }
+
+fn run_cmd_with_vault_dir(vault_dir: &Path, args: &[&str]) -> assert_cmd::Command {
+    let mut cmd = Command::new(
+        std::env::current_exe()
+            .ok()
+            .map(|mut exe| {
+                exe.pop();
+                if exe.ends_with("deps") {
+                    exe.pop();
+                }
+                exe.push("bdstorage");
+                exe
+            })
+            .expect("Failed to find bdstorage binary"),
+    );
+    // Set HOME to a non-existent path to prove --vault-dir takes precedence
+    cmd.env("HOME", "/nonexistent");
+    cmd.arg("--vault-dir").arg(vault_dir);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
+#[test]
+fn test_vault_dir_flag_dedupe_and_restore() {
+    let data_tmp = setup_env();
+    let vault_tmp = setup_env();
+
+    let target = data_tmp.path().join("data");
+    fs::create_dir(&target).expect("create target dir");
+
+    for i in 0..3 {
+        create_file_with_content(&target, &format!("dup_{}.txt", i), b"vault-dir test content");
+    }
+
+    let mut dedupe_cmd = run_cmd_with_vault_dir(
+        vault_tmp.path(),
+        &["dedupe", &target.to_string_lossy(), "--allow-unsafe-hardlinks"],
+    );
+    dedupe_cmd.assert().success();
+
+    assert!(
+        vault_tmp.path().join("state.redb").exists(),
+        "state.redb should be in custom vault dir"
+    );
+    assert!(
+        vault_tmp.path().join("store").exists(),
+        "store/ should be in custom vault dir"
+    );
+
+    let mut restore_cmd = run_cmd_with_vault_dir(
+        vault_tmp.path(),
+        &["restore", &target.to_string_lossy()],
+    );
+    restore_cmd.assert().success();
+
+    let content = fs::read(target.join("dup_0.txt")).expect("read restored file");
+    assert_eq!(content, b"vault-dir test content");
+}
+
+#[test]
+fn test_bdstorage_vault_env_var() {
+    let data_tmp = setup_env();
+    let vault_tmp = setup_env();
+
+    let target = data_tmp.path().join("data");
+    fs::create_dir(&target).expect("create target dir");
+
+    for i in 0..3 {
+        create_file_with_content(&target, &format!("dup_{}.txt", i), b"env var test content");
+    }
+
+    let mut cmd = Command::new(
+        std::env::current_exe()
+            .ok()
+            .map(|mut exe| {
+                exe.pop();
+                if exe.ends_with("deps") {
+                    exe.pop();
+                }
+                exe.push("bdstorage");
+                exe
+            })
+            .expect("Failed to find bdstorage binary"),
+    );
+    cmd.env("HOME", "/nonexistent");
+    cmd.env("BDSTORAGE_VAULT", vault_tmp.path());
+    cmd.args(["dedupe", &target.to_string_lossy(), "--allow-unsafe-hardlinks"]);
+    cmd.assert().success();
+
+    assert!(
+        vault_tmp.path().join("state.redb").exists(),
+        "state.redb should be in BDSTORAGE_VAULT dir"
+    );
+    assert!(
+        vault_tmp.path().join("store").exists(),
+        "store/ should be in BDSTORAGE_VAULT dir"
+    );
+}

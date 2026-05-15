@@ -26,9 +26,14 @@ use crate::types::{FileMetadata, Hash};
     version,
     about = "bdstorage: A speed-first, local file deduplication engine.",
     long_about = "bdstorage uses a Tiered Hashing philosophy to minimize I/O overhead:\n\nSize Grouping: Eliminates unique file sizes immediately.\n\nSparse Hashing: Samples 12KB (start/middle/end) to identify candidates.\n\nFull BLAKE3 Hashing: Verifies matches with high-performance 128KB buffering.",
-    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS:\n  State DB: ~/.imprint/state.redb\n  CAS Vault: ~/.imprint/store\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  -h, --help     Print help\n  -V, --version  Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
+    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS (override: --vault-dir or $BDSTORAGE_VAULT):\n  State DB: <vault-dir>/state.redb  (default: ~/.imprint/state.redb)\n  CAS Vault: <vault-dir>/store/     (default: ~/.imprint/store/)\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  --vault-dir <PATH>   Override vault/state directory (env: BDSTORAGE_VAULT)\n  -h, --help           Print help\n  -V, --version        Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
 )]
 struct Cli {
+    /// Override the vault and state directory.
+    /// Falls back to $BDSTORAGE_VAULT env var, then $HOME/.imprint/.
+    #[arg(long, global = true, env = "BDSTORAGE_VAULT")]
+    vault_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -94,6 +99,16 @@ struct DedupeRunSummary {
     files_linked: usize,
 }
 
+fn resolve_vault_dir(cli_override: Option<&Path>) -> Result<PathBuf> {
+    match cli_override {
+        Some(p) => Ok(p.to_path_buf()),
+        None => {
+            let home = std::env::var("HOME").with_context(|| "HOME not set")?;
+            Ok(PathBuf::from(home).join(".imprint"))
+        }
+    }
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("{err:?}");
@@ -103,22 +118,23 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Cli::parse();
+    let vault_dir = resolve_vault_dir(args.vault_dir.as_deref())?;
 
     match args.command {
         Commands::Scan { path } => {
-            let state = state::State::open_default()?;
+            let state = state::State::open_default(&vault_dir)?;
             let groups = scan_pipeline(&path, &state)?;
             print_summary("scan", &groups);
         }
         Commands::Dedupe(opts) => {
-            let summary = run_dedupe_once(&opts)?;
+            let summary = run_dedupe_once(&opts, &vault_dir)?;
             println!(
                 "dedupe complete. duplicate groups: {} files linked: {}",
                 summary.duplicate_groups, summary.files_linked
             );
         }
         Commands::Daemon { command } => match command {
-            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs)?,
+            DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs, &vault_dir)?,
             DaemonCommand::Install(opts) => systemd::install_daemon_service(
                 &opts.target,
                 opts.interval_secs,
@@ -127,22 +143,22 @@ fn run() -> Result<()> {
         },
         Commands::Restore { path, dry_run } => {
             let state = if dry_run {
-                state::State::open_readonly_if_exists()?
+                state::State::open_readonly_if_exists(&vault_dir)?
             } else {
-                state::State::open_default()?
+                state::State::open_default(&vault_dir)?
             };
-            restore_pipeline(&path, &state, dry_run)?;
+            restore_pipeline(&path, &state, dry_run, &vault_dir)?;
         }
     }
 
     Ok(())
 }
 
-fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
+fn run_dedupe_once(opts: &DedupeOptions, vault_dir: &Path) -> Result<DedupeRunSummary> {
     let state = if opts.dry_run {
-        state::State::open_readonly_if_exists()?
+        state::State::open_readonly_if_exists(vault_dir)?
     } else {
-        state::State::open_default()?
+        state::State::open_default(vault_dir)?
     };
     let groups = scan_pipeline(&opts.path, &state)?;
     dedupe_groups(
@@ -151,10 +167,11 @@ fn run_dedupe_once(opts: &DedupeOptions) -> Result<DedupeRunSummary> {
         opts.paranoid,
         opts.dry_run,
         opts.allow_unsafe_hardlinks,
+        vault_dir,
     )
 }
 
-fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
+fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: &Path) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(1);
     ctrlc::set_handler(move || {
         let _ = shutdown_tx.try_send(());
@@ -174,7 +191,7 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64) -> Result<()> {
 
         println!("[daemon] run #{run_no} started");
         let started = std::time::Instant::now();
-        match run_dedupe_once(&opts) {
+        match run_dedupe_once(&opts, vault_dir) {
             Ok(summary) => {
                 println!(
                     "[daemon] run #{run_no} complete in {:.2}s; duplicate_groups={} files_linked={}",
@@ -337,6 +354,7 @@ fn dedupe_groups(
     paranoid: bool,
     dry_run: bool,
     allow_unsafe_hardlinks: bool,
+    vault_dir: &Path,
 ) -> Result<DedupeRunSummary> {
     let mut global_db_ops = Vec::new();
     let mut files_linked = 0usize;
@@ -395,7 +413,7 @@ fn dedupe_groups(
         let master = &paths[0];
 
         let vault_path = if dry_run {
-            let theoretical_path = vault::shard_path(hash)?;
+            let theoretical_path = vault::shard_path(vault_dir, hash);
             let name = display_name(master);
             println!(
                 "{} Would move master: {} -> {}",
@@ -405,7 +423,7 @@ fn dedupe_groups(
             );
             theoretical_path
         } else {
-            vault::ensure_in_vault(hash, master)?
+            vault::ensure_in_vault(vault_dir, hash, master)?
         };
 
         let mut master_verified = false;
@@ -644,7 +662,7 @@ fn print_summary(mode: &str, groups: &HashMap<Hash, Vec<PathBuf>>) {
     println!("{mode} complete. duplicate groups: {duplicates}");
 }
 
-fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<()> {
+fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool, vault_dir: &Path) -> Result<()> {
     let multi = MultiProgress::new();
     let restore_spinner = multi.add(ProgressBar::new_spinner());
     restore_spinner.set_style(
@@ -687,12 +705,12 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
             if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
                 target_hash = Some(file_meta.hash);
             }
-        } else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path)
-            && let Ok(vault_path) = vault::shard_path(&file_meta.hash)
-            && vault_path.exists()
-        {
-            needs_restore = true;
-            target_hash = Some(file_meta.hash);
+        } else if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
+            let vault_path = vault::shard_path(vault_dir, &file_meta.hash);
+            if vault_path.exists() {
+                needs_restore = true;
+                target_hash = Some(file_meta.hash);
+            }
         }
 
         if needs_restore {
@@ -724,7 +742,7 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool) -> Result<
                 {
                     current_refcount -= 1;
                     if current_refcount == 0 {
-                        let _ = vault::remove_from_vault(&hash);
+                        let _ = vault::remove_from_vault(vault_dir, &hash);
                         restore_ops.push(DbOp::RemoveCasRefcount(hash));
                         println!(
                             "{}    -> Vault copy pruned (refcount 0)",
