@@ -392,7 +392,6 @@ fn run_cmd_with_vault_dir(vault_dir: &Path, args: &[&str]) -> assert_cmd::Comman
             })
             .expect("Failed to find bdstorage binary"),
     );
-    // Set HOME to a non-existent path to prove --vault-dir takes precedence
     cmd.env("HOME", "/nonexistent");
     cmd.arg("--vault-dir").arg(vault_dir);
     for arg in args {
@@ -477,3 +476,84 @@ fn test_bdstorage_vault_env_var() {
         "store/ should be in BDSTORAGE_VAULT dir"
     );
 }
+
+#[test]
+fn test_json_output_acceptance() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"1234");
+    create_file_with_content(&target, "file2.txt", b"1234");
+
+    let mut cmd = run_cmd(
+        home,
+        &[
+            "--output-format",
+            "json",
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    let output = cmd.assert().success().get_output().stdout.clone();
+    let json_str = String::from_utf8_lossy(&output);
+    let json: serde_json::Value =
+        serde_json::from_str(&json_str).expect("Failed to parse dedupe JSON output");
+
+    assert_eq!(json["files_scanned"], 2);
+    assert_eq!(json["duplicate_groups"], 1);
+    assert_eq!(json["bytes_saved"], 4);
+    assert_eq!(json["links_created"], 2);
+    assert_eq!(json["vault_objects_added"], 1);
+
+    let scan_target = home.join("scan_data");
+    fs::create_dir(&scan_target).expect("Failed to create scan target directory");
+    create_file_with_content(&scan_target, "scan1.txt", b"scan duplicate");
+    create_file_with_content(&scan_target, "scan2.txt", b"scan duplicate");
+
+    let mut cmd_scan = run_cmd(
+        home,
+        &[
+            "--output-format",
+            "json",
+            "scan",
+            &scan_target.to_string_lossy(),
+        ],
+    );
+    let output_scan = cmd_scan.assert().success().get_output().stdout.clone();
+    let json_scan_str = String::from_utf8_lossy(&output_scan);
+    let json_scan: serde_json::Value =
+        serde_json::from_str(&json_scan_str).expect("Failed to parse scan JSON output");
+
+    assert_eq!(json_scan["files_scanned"], 2);
+    assert_eq!(json_scan["duplicate_groups"], 1);
+
+    let dry_run_target = home.join("dry_run_data");
+    fs::create_dir(&dry_run_target).expect("Failed to create dry-run target directory");
+    create_file_with_content(&dry_run_target, "dry1.txt", b"1234");
+    create_file_with_content(&dry_run_target, "dry2.txt", b"1234");
+
+    let mut cmd_dry = run_cmd(
+        home,
+        &[
+            "--output-format",
+            "json",
+            "dedupe",
+            &dry_run_target.to_string_lossy(),
+            "--dry-run",
+        ],
+    );
+    let output_dry = cmd_dry.assert().success().get_output().stdout.clone();
+    let json_dry_str = String::from_utf8_lossy(&output_dry);
+    let json_dry: serde_json::Value =
+        serde_json::from_str(&json_dry_str).expect("Failed to parse dry-run JSON output");
+
+    assert_eq!(json_dry["files_scanned"], 2);
+    assert_eq!(json_dry["duplicate_groups"], 1);
+    assert_eq!(json_dry["bytes_saved"], 4);
+    assert_eq!(json_dry["links_created"], 2);
+    assert_eq!(json_dry["vault_objects_added"], 0);
+}
+

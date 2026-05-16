@@ -26,13 +26,16 @@ use crate::types::{FileMetadata, Hash};
     version,
     about = "bdstorage: A speed-first, local file deduplication engine.",
     long_about = "bdstorage uses a Tiered Hashing philosophy to minimize I/O overhead:\n\nSize Grouping: Eliminates unique file sizes immediately.\n\nSparse Hashing: Samples 12KB (start/middle/end) to identify candidates.\n\nFull BLAKE3 Hashing: Verifies matches with high-performance 128KB buffering.",
-    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS (override: --vault-dir or $BDSTORAGE_VAULT):\n  State DB: <vault-dir>/state.redb  (default: ~/.imprint/state.redb)\n  CAS Vault: <vault-dir>/store/     (default: ~/.imprint/store/)\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  --vault-dir <PATH>   Override vault/state directory (env: BDSTORAGE_VAULT)\n  -h, --help           Print help\n  -V, --version        Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
+    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS (override: --vault-dir or $BDSTORAGE_VAULT):\n  State DB: <vault-dir>/state.redb  (default: ~/.imprint/state.redb)\n  CAS Vault: <vault-dir>/store/     (default: ~/.imprint/store/)\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  --vault-dir <PATH>           Override vault/state directory (env: BDSTORAGE_VAULT)\n  --output-format <text|json>  Set output format (default: text)\n  -h, --help                   Print help\n  -V, --version                Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
 )]
 struct Cli {
     /// Override the vault and state directory.
     /// Falls back to $BDSTORAGE_VAULT env var, then $HOME/.imprint/.
     #[arg(long, global = true, env = "BDSTORAGE_VAULT")]
     vault_dir: Option<PathBuf>,
+
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
 
     #[command(subcommand)]
     command: Commands,
@@ -103,7 +106,9 @@ fn resolve_vault_dir(cli_override: Option<&Path>) -> Result<PathBuf> {
     match cli_override {
         Some(p) => Ok(p.to_path_buf()),
         None => {
-            let home = std::env::var("HOME").with_context(|| "HOME not set")?;
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .with_context(|| "Neither HOME nor USERPROFILE is set")?;
             Ok(PathBuf::from(home).join(".imprint"))
         }
     }
@@ -119,27 +124,40 @@ fn main() {
 fn run() -> Result<()> {
     let args = Cli::parse();
     let vault_dir = resolve_vault_dir(args.vault_dir.as_deref())?;
+    let mut report = JsonReport::default();
 
     match args.command {
         Commands::Scan { path } => {
             let state = state::State::open_default(&vault_dir)?;
-            let groups = scan_pipeline(&path, &state)?;
-            print_summary("scan", &groups);
+            let groups = scan_pipeline(&path, &state, args.output_format, &mut report)?;
+            if args.output_format == OutputFormat::Text {
+                print_summary("scan", &groups);
+            }
         }
         Commands::Dedupe(opts) => {
-            let summary = run_dedupe_once(&opts, &vault_dir)?;
-            println!(
-                "dedupe complete. duplicate groups: {} files linked: {}",
-                summary.duplicate_groups, summary.files_linked
-            );
+            let summary = run_dedupe_once(&opts, &vault_dir, args.output_format, &mut report)?;
+            if args.output_format == OutputFormat::Text {
+                println!(
+                    "dedupe complete. duplicate groups: {} files linked: {}",
+                    summary.duplicate_groups, summary.files_linked
+                );
+            }
         }
         Commands::Daemon { command } => match command {
             DaemonCommand::Run(opts) => run_daemon(opts.dedupe, opts.interval_secs, &vault_dir)?,
-            DaemonCommand::Install(opts) => systemd::install_daemon_service(
-                &opts.target,
-                opts.interval_secs,
-                opts.allow_unsafe_hardlinks,
-            )?,
+            DaemonCommand::Install(opts) => {
+                #[cfg(not(windows))]
+                systemd::install_daemon_service(
+                    &opts.target,
+                    opts.interval_secs,
+                    opts.allow_unsafe_hardlinks,
+                )?;
+                #[cfg(windows)]
+                {
+                    let _ = opts;
+                    anyhow::bail!("systemd is not supported on Windows");
+                }
+            }
         },
         Commands::Restore { path, dry_run } => {
             let state = if dry_run {
