@@ -122,6 +122,7 @@ dependencies = [
  "redb",
  "reflink",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "walkdir",

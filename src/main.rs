@@ -2,22 +2,24 @@ mod dedupe;
 mod hasher;
 mod scanner;
 mod state;
+#[cfg(not(windows))]
 mod systemd;
 mod types;
 mod vault;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::*;
 use crossbeam::channel;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::state::DbOp;
-use crate::types::{FileMetadata, Hash};
+use crate::types::{FileMetadata, Hash, JsonReport, ProcessingError};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,9 +38,15 @@ struct Cli {
 
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
-
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+enum OutputFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -169,16 +177,25 @@ fn run() -> Result<()> {
         }
     }
 
+    if args.output_format == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
+
     Ok(())
 }
 
-fn run_dedupe_once(opts: &DedupeOptions, vault_dir: &Path) -> Result<DedupeRunSummary> {
+fn run_dedupe_once(
+    opts: &DedupeOptions,
+    vault_dir: &Path,
+    format: OutputFormat,
+    report: &mut JsonReport,
+) -> Result<DedupeRunSummary> {
     let state = if opts.dry_run {
         state::State::open_readonly_if_exists(vault_dir)?
     } else {
         state::State::open_default(vault_dir)?
     };
-    let groups = scan_pipeline(&opts.path, &state)?;
+    let groups = scan_pipeline(&opts.path, &state, format, report)?;
     dedupe_groups(
         &groups,
         &state,
@@ -186,6 +203,8 @@ fn run_dedupe_once(opts: &DedupeOptions, vault_dir: &Path) -> Result<DedupeRunSu
         opts.dry_run,
         opts.allow_unsafe_hardlinks,
         vault_dir,
+        format,
+        report,
     )
 }
 
@@ -209,7 +228,8 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: &Path) -> Resu
 
         println!("[daemon] run #{run_no} started");
         let started = std::time::Instant::now();
-        match run_dedupe_once(&opts, vault_dir) {
+        let mut daemon_report = JsonReport::default();
+        match run_dedupe_once(&opts, vault_dir, OutputFormat::Text, &mut daemon_report) {
             Ok(summary) => {
                 println!(
                     "[daemon] run #{run_no} complete in {:.2}s; duplicate_groups={} files_linked={}",
@@ -237,9 +257,19 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: &Path) -> Resu
     Ok(())
 }
 
-fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<PathBuf>>> {
+fn scan_pipeline(
+    path: &Path,
+    state: &state::State,
+    format: OutputFormat,
+    report: &mut JsonReport,
+) -> Result<HashMap<Hash, Vec<PathBuf>>> {
+    let is_json = format == OutputFormat::Json;
     let multi = MultiProgress::new();
-    let scan_spinner = multi.add(ProgressBar::new_spinner());
+    let scan_spinner = if is_json {
+        ProgressBar::hidden()
+    } else {
+        multi.add(ProgressBar::new_spinner())
+    };
     scan_spinner.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner} {msg}")
@@ -247,7 +277,11 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     );
     scan_spinner.set_message("Scanning...");
 
-    let hash_bar = multi.add(progress("Indexing/Hashing", 0));
+    let hash_bar = if is_json {
+        ProgressBar::hidden()
+    } else {
+        multi.add(progress("Indexing/Hashing", 0))
+    };
 
     let (scan_tx, scan_rx) = channel::unbounded();
     let path_clone = path.to_path_buf();
@@ -256,7 +290,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     let (hash_task_tx, hash_task_rx) = channel::unbounded::<PathBuf>();
 
-    let (result_tx, result_rx) = channel::unbounded::<(Hash, PathBuf)>();
+    let (result_tx, result_rx) = channel::unbounded::<Result<(Hash, PathBuf), (PathBuf, String)>>();
 
     let (db_tx, db_rx) = channel::unbounded::<DbOp>();
 
@@ -274,26 +308,33 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
         let handle = std::thread::spawn(move || {
             while let Ok(file_path) = rx.recv() {
                 if let Ok(metadata) = std::fs::metadata(&file_path) {
-                    let inode = metadata.ino();
-                    if let Ok(is_vaulted) = state_ref.is_inode_vaulted(inode)
-                        && is_vaulted
-                    {
+                    let inode = get_inode(&metadata);
+                    if inode != 0 && state_ref.is_inode_vaulted(inode).unwrap_or(false) {
                         continue;
                     }
 
                     let size = metadata.len();
-                    if let Ok(_) = hasher::sparse_hash(&file_path, size)
-                        && let Ok(full_hash) = hasher::full_hash(&file_path)
-                    {
-                        let modified = file_modified(&file_path).unwrap_or(0);
-                        let file_metadata = FileMetadata {
-                            size,
-                            modified,
-                            hash: full_hash,
-                        };
-                        let _ = db_ops_tx.send(DbOp::UpsertFile(file_path.clone(), file_metadata));
-                        let _ = tx.send((full_hash, file_path));
-                        hash_bar_clone.inc(1);
+                    match hasher::sparse_hash(&file_path, size) {
+                        Ok(_) => match hasher::full_hash(&file_path) {
+                            Ok(full_hash) => {
+                                let modified = file_modified(&file_path).unwrap_or(0);
+                                let file_metadata = FileMetadata {
+                                    size,
+                                    modified,
+                                    hash: full_hash,
+                                };
+                                let _ = db_ops_tx
+                                    .send(DbOp::UpsertFile(file_path.clone(), file_metadata));
+                                let _ = tx.send(Ok((full_hash, file_path)));
+                                hash_bar_clone.inc(1);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err((file_path, format!("Full hash failed: {e}"))));
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.send(Err((file_path, format!("Sparse hash failed: {e}"))));
+                        }
                     }
                 }
             }
@@ -309,24 +350,35 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
 
     let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
 
-    while let Ok(file_path) = scan_rx.recv() {
+    while let Ok(res) = scan_rx.recv() {
         scan_spinner.tick();
+        match res {
+            Ok(file_path) => {
+                if let Ok(metadata) = std::fs::metadata(&file_path) {
+                    let size = metadata.len();
+                    report.files_scanned += 1;
 
-        if let Ok(metadata) = std::fs::metadata(&file_path) {
-            let size = metadata.len();
-            let entry = size_map.entry(size).or_default();
-            let len_before = entry.len();
-            entry.push(file_path.clone());
+                    let entry = size_map.entry(size).or_default();
+                    let len_before = entry.len();
+                    entry.push(file_path.clone());
 
-            if len_before == 1 {
-                if let Some(first_file) = entry.first().cloned() {
-                    let _ = hash_task_tx.send(first_file);
+                    if len_before == 1 {
+                        if let Some(first_file) = entry.first().cloned() {
+                            let _ = hash_task_tx.send(first_file);
+                        }
+                        let _ = hash_task_tx.send(file_path);
+                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
+                    } else if len_before > 1 {
+                        let _ = hash_task_tx.send(file_path);
+                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
+                    }
                 }
-                let _ = hash_task_tx.send(file_path);
-                hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
-            } else if len_before > 1 {
-                let _ = hash_task_tx.send(file_path);
-                hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
+            }
+            Err((path, reason)) => {
+                report.errors.push(ProcessingError {
+                    path: path.display().to_string(),
+                    reason,
+                });
             }
         }
     }
@@ -345,9 +397,21 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     drop(db_tx);
 
     let mut results: HashMap<Hash, Vec<PathBuf>> = HashMap::new();
-    while let Ok((hash, path)) = result_rx.recv() {
-        results.entry(hash).or_default().push(path);
+    while let Ok(res) = result_rx.recv() {
+        match res {
+            Ok((hash, path)) => {
+                results.entry(hash).or_default().push(path);
+            }
+            Err((path, reason)) => {
+                report.errors.push(ProcessingError {
+                    path: path.display().to_string(),
+                    reason,
+                });
+            }
+        }
     }
+
+    report.duplicate_groups = results.values().filter(|g| g.len() > 1).count();
 
     hash_bar.finish_and_clear();
 
@@ -366,6 +430,7 @@ fn scan_pipeline(path: &Path, state: &state::State) -> Result<HashMap<Hash, Vec<
     Ok(results)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dedupe_groups(
     groups: &HashMap<Hash, Vec<PathBuf>>,
     state: &state::State,
@@ -373,12 +438,20 @@ fn dedupe_groups(
     dry_run: bool,
     allow_unsafe_hardlinks: bool,
     vault_dir: &Path,
+    format: OutputFormat,
+    report: &mut JsonReport,
 ) -> Result<DedupeRunSummary> {
+    let is_json = format == OutputFormat::Json;
     let mut global_db_ops = Vec::new();
     let mut files_linked = 0usize;
     let duplicate_groups = groups.values().filter(|g| g.len() > 1).count();
+    report.duplicate_groups = duplicate_groups;
+
     let mut reflink_warning_shown = false;
     let mut warn_reflink_unsupported = |name: &str| {
+        if is_json {
+            return;
+        }
         if !reflink_warning_shown {
             println!("\n{}", "━".repeat(80).yellow());
             println!(
@@ -421,7 +494,9 @@ fn dedupe_groups(
             println!();
             reflink_warning_shown = true;
         }
-        println!("{} {}", "[SKIPPED]".bold().red(), name);
+        if !is_json {
+            println!("{} {}", "[SKIPPED]".bold().red(), name);
+        }
     };
 
     for (hash, paths) in groups {
@@ -433,14 +508,20 @@ fn dedupe_groups(
         let vault_path = if dry_run {
             let theoretical_path = vault::shard_path(vault_dir, hash);
             let name = display_name(master);
-            println!(
-                "{} Would move master: {} -> {}",
-                "[DRY RUN]".yellow().dimmed(),
-                name,
-                theoretical_path.display()
-            );
+            if !is_json {
+                println!(
+                    "{} Would move master: {} -> {}",
+                    "[DRY RUN]".yellow().dimmed(),
+                    name,
+                    theoretical_path.display()
+                );
+            }
             theoretical_path
         } else {
+            let dest = vault::shard_path(vault_dir, hash);
+            if !dest.exists() {
+                report.vault_objects_added += 1;
+            }
             vault::ensure_in_vault(vault_dir, hash, master)?
         };
 
@@ -449,17 +530,29 @@ fn dedupe_groups(
             match dedupe::compare_files(&vault_path, master) {
                 Ok(true) => master_verified = true,
                 Ok(false) => {
-                    eprintln!("HASH COLLISION OR BIT ROT DETECTED: {}", master.display());
+                    if !is_json {
+                        eprintln!("HASH COLLISION OR BIT ROT DETECTED: {}", master.display());
+                    }
+                    report.errors.push(ProcessingError {
+                        path: master.display().to_string(),
+                        reason: "Hash collision or bit rot detected".to_string(),
+                    });
                     continue;
                 }
                 Err(err) => {
-                    eprintln!("VERIFY FAILED (skipping): {}: {err}", master.display());
+                    if !is_json {
+                        eprintln!("VERIFY FAILED (skipping): {}: {err}", master.display());
+                    }
+                    report.errors.push(ProcessingError {
+                        path: master.display().to_string(),
+                        reason: format!("Verify failed: {err}"),
+                    });
                     continue;
                 }
             }
         }
 
-        if paranoid && dry_run {
+        if paranoid && dry_run && !is_json {
             println!(
                 "{} Skipping paranoid verification (master not in vault)",
                 "[DRY RUN]".yellow().dimmed()
@@ -472,101 +565,15 @@ fn dedupe_groups(
             match dedupe::replace_with_link(&vault_path, master, allow_unsafe_hardlinks) {
                 Ok(Some(link_type)) => {
                     if link_type == dedupe::LinkType::HardLink {
-                        let inode = std::fs::metadata(master)?.ino();
+                        let inode = get_inode(&std::fs::metadata(master)?);
                         db_ops.push(DbOp::MarkInodeVaulted(inode));
                     }
                     if !is_temp_file(master) {
                         let name = display_name(master);
-                        match link_type {
-                            dedupe::LinkType::Reflink => {
-                                if paranoid && master_verified {
-                                    println!(
-                                        "{} {} {}",
-                                        "[REFLINK ]".bold().green(),
-                                        "[VERIFIED]".bold().blue(),
-                                        name
-                                    );
-                                } else {
-                                    println!("{} {}", "[REFLINK ]".bold().green(), name);
-                                }
-                            }
-                            dedupe::LinkType::HardLink => {
-                                if paranoid && master_verified {
-                                    println!(
-                                        "{} {} {}",
-                                        "[HARDLINK]".bold().yellow(),
-                                        "[VERIFIED]".bold().blue(),
-                                        name
-                                    );
-                                } else {
-                                    println!("{} {}", "[HARDLINK]".bold().yellow(), name);
-                                }
-                            }
-                        }
-                        files_linked += 1;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    if e.to_string().contains("reflink not supported") {
-                        if let Err(restore_err) = std::fs::rename(&vault_path, master) {
-                            let copy_result = std::fs::copy(&vault_path, master)
-                                .and_then(|_| std::fs::remove_file(&vault_path));
-                            if let Err(copy_err) = copy_result {
-                                eprintln!(
-                                    "[ERROR] Failed to restore master from vault. File remains at {}. Rename error: {restore_err}. Copy/remove error: {copy_err}",
-                                    vault_path.display()
-                                );
-                            }
-                        }
-
-                        let name = display_name(master);
-                        warn_reflink_unsupported(&name);
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        } else {
-            let name = display_name(master);
-            println!(
-                "{} Would dedupe: {} -> {} (reflink/hardlink)",
-                "[DRY RUN]".yellow().dimmed(),
-                name,
-                vault_path.display()
-            );
-            files_linked += 1;
-        }
-
-        for path in paths.iter().skip(1) {
-            let mut verified = false;
-            if paranoid && !dry_run {
-                match dedupe::compare_files(&vault_path, path) {
-                    Ok(true) => verified = true,
-                    Ok(false) => {
-                        eprintln!("HASH COLLISION OR BIT ROT DETECTED: {}", path.display());
-                        continue;
-                    }
-                    Err(err) => {
-                        eprintln!("VERIFY FAILED (skipping): {}: {err}", path.display());
-                        continue;
-                    }
-                }
-            }
-
-            if !dry_run {
-                match dedupe::replace_with_link(&vault_path, path, allow_unsafe_hardlinks) {
-                    Ok(Some(link_type)) => {
-                        if link_type == dedupe::LinkType::HardLink {
-                            let inode = std::fs::metadata(path)?.ino();
-                            db_ops.push(DbOp::MarkInodeVaulted(inode));
-                        }
-                        if !is_temp_file(path) {
-                            let name = display_name(path);
+                        if !is_json {
                             match link_type {
                                 dedupe::LinkType::Reflink => {
-                                    if paranoid && verified {
+                                    if paranoid && master_verified {
                                         println!(
                                             "{} {} {}",
                                             "[REFLINK ]".bold().green(),
@@ -578,7 +585,7 @@ fn dedupe_groups(
                                     }
                                 }
                                 dedupe::LinkType::HardLink => {
-                                    if paranoid && verified {
+                                    if paranoid && master_verified {
                                         println!(
                                             "{} {} {}",
                                             "[HARDLINK]".bold().yellow(),
@@ -592,27 +599,165 @@ fn dedupe_groups(
                             }
                         }
                         files_linked += 1;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        if e.to_string().contains("reflink not supported") {
-                            let name = display_name(path);
-                            warn_reflink_unsupported(&name);
-                            continue;
-                        } else {
-                            return Err(e);
-                        }
+                        report.links_created += 1;
+                        // We DON'T add master size to bytes_saved to avoid overcounting.
+                        // Saved space = (original files) - (vault copy).
+                        // If we have 2 files, saved space = 1 file size.
                     }
                 }
-            } else {
-                let name = display_name(path);
+                Ok(None) => {}
+                Err(e) => {
+                    if e.to_string().contains("reflink not supported") {
+                        if let Err(restore_err) = std::fs::rename(&vault_path, master) {
+                            let copy_result = std::fs::copy(&vault_path, master)
+                                .and_then(|_| std::fs::remove_file(&vault_path));
+                            if let Err(copy_err) = copy_result
+                                && !is_json
+                            {
+                                eprintln!(
+                                    "[ERROR] Failed to restore master from vault. File remains at {}. Rename error: {restore_err}. Copy/remove error: {copy_err}",
+                                    vault_path.display()
+                                );
+                            }
+                        }
+
+                        let name = display_name(master);
+                        warn_reflink_unsupported(&name);
+                        report.errors.push(ProcessingError {
+                            path: master.display().to_string(),
+                            reason: "Reflink not supported and hardlinks not allowed".to_string(),
+                        });
+                        continue;
+                    } else {
+                        report.errors.push(ProcessingError {
+                            path: master.display().to_string(),
+                            reason: format!("Dedupe failed: {e}"),
+                        });
+                        return Err(e);
+                    }
+                }
+            }
+        } else {
+            if !is_json {
+                let name = display_name(master);
                 println!(
                     "{} Would dedupe: {} -> {} (reflink/hardlink)",
                     "[DRY RUN]".yellow().dimmed(),
                     name,
                     vault_path.display()
                 );
+            }
+            files_linked += 1;
+            report.links_created += 1;
+        }
+
+        for path in paths.iter().skip(1) {
+            let mut verified = false;
+            if paranoid && !dry_run {
+                match dedupe::compare_files(&vault_path, path) {
+                    Ok(true) => verified = true,
+                    Ok(false) => {
+                        if !is_json {
+                            eprintln!("HASH COLLISION OR BIT ROT DETECTED: {}", path.display());
+                        }
+                        report.errors.push(ProcessingError {
+                            path: path.display().to_string(),
+                            reason: "Hash collision or bit rot detected".to_string(),
+                        });
+                        continue;
+                    }
+                    Err(err) => {
+                        if !is_json {
+                            eprintln!("VERIFY FAILED (skipping): {}: {err}", path.display());
+                        }
+                        report.errors.push(ProcessingError {
+                            path: path.display().to_string(),
+                            reason: format!("Verify failed: {err}"),
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            if !dry_run {
+                match dedupe::replace_with_link(&vault_path, path, allow_unsafe_hardlinks) {
+                    Ok(Some(link_type)) => {
+                        if link_type == dedupe::LinkType::HardLink {
+                            let inode = get_inode(&std::fs::metadata(path)?);
+                            db_ops.push(DbOp::MarkInodeVaulted(inode));
+                        }
+                        if !is_temp_file(path) {
+                            let name = display_name(path);
+                            if !is_json {
+                                match link_type {
+                                    dedupe::LinkType::Reflink => {
+                                        if paranoid && verified {
+                                            println!(
+                                                "{} {} {}",
+                                                "[REFLINK ]".bold().green(),
+                                                "[VERIFIED]".bold().blue(),
+                                                name
+                                            );
+                                        } else {
+                                            println!("{} {}", "[REFLINK ]".bold().green(), name);
+                                        }
+                                    }
+                                    dedupe::LinkType::HardLink => {
+                                        if paranoid && verified {
+                                            println!(
+                                                "{} {} {}",
+                                                "[HARDLINK]".bold().yellow(),
+                                                "[VERIFIED]".bold().blue(),
+                                                name
+                                            );
+                                        } else {
+                                            println!("{} {}", "[HARDLINK]".bold().yellow(), name);
+                                        }
+                                    }
+                                }
+                            }
+                            report.links_created += 1;
+                            if let Ok(meta) = std::fs::metadata(path) {
+                                report.bytes_saved += meta.len();
+                            }
+                        }
+                        files_linked += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if e.to_string().contains("reflink not supported") {
+                            let name = display_name(path);
+                            warn_reflink_unsupported(&name);
+                            report.errors.push(ProcessingError {
+                                path: path.display().to_string(),
+                                reason: "Reflink not supported and hardlinks not allowed"
+                                    .to_string(),
+                            });
+                            continue;
+                        } else {
+                            report.errors.push(ProcessingError {
+                                path: path.display().to_string(),
+                                reason: format!("Dedupe failed for duplicate: {e}"),
+                            });
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                let name = display_name(path);
+                if !is_json {
+                    println!(
+                        "{} Would dedupe: {} -> {} (reflink/hardlink)",
+                        "[DRY RUN]".yellow().dimmed(),
+                        name,
+                        vault_path.display()
+                    );
+                }
                 files_linked += 1;
+                report.links_created += 1;
+                if let Ok(meta) = std::fs::metadata(path) {
+                    report.bytes_saved += meta.len();
+                }
             }
         }
 
@@ -624,11 +769,13 @@ fn dedupe_groups(
             }
         } else {
             let hex = crate::types::hash_to_hex(hash);
-            println!(
-                "{} Would update DB state for hash {}",
-                "[DRY RUN]".yellow().dimmed(),
-                hex
-            );
+            if !is_json {
+                println!(
+                    "{} Would update DB state for hash {}",
+                    "[DRY RUN]".yellow().dimmed(),
+                    hex
+                );
+            }
         }
     }
 
@@ -675,12 +822,30 @@ fn progress(label: &str, total: u64) -> ProgressBar {
     bar
 }
 
+fn get_inode(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    return metadata.ino();
+    #[cfg(windows)]
+    {
+        // Stable file_index() is only available in newer Rust versions or via unstable features.
+        // For now, we return 0 on Windows, which disables the inode-based optimization
+        // but keeps the tool safe and functional.
+        let _ = metadata;
+        0
+    }
+}
+
 fn print_summary(mode: &str, groups: &HashMap<Hash, Vec<PathBuf>>) {
     let duplicates = groups.values().filter(|g| g.len() > 1).count();
     println!("{mode} complete. duplicate groups: {duplicates}");
 }
 
-fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool, vault_dir: &Path) -> Result<()> {
+fn restore_pipeline(
+    path: &Path,
+    state: &state::State,
+    dry_run: bool,
+    vault_dir: &Path,
+) -> Result<()> {
     let multi = MultiProgress::new();
     let restore_spinner = multi.add(ProgressBar::new_spinner());
     restore_spinner.set_style(
@@ -712,13 +877,13 @@ fn restore_pipeline(path: &Path, state: &state::State, dry_run: bool, vault_dir:
             Err(_) => continue,
         };
 
-        let inode = metadata.ino();
+        let inode = get_inode(&metadata);
         let size = metadata.len();
 
         let mut needs_restore = false;
         let mut target_hash: Option<Hash> = None;
 
-        if state.is_inode_vaulted(inode).unwrap_or(false) {
+        if inode != 0 && state.is_inode_vaulted(inode).unwrap_or(false) {
             needs_restore = true;
             if let Ok(Some(file_meta)) = state.get_file_metadata(&file_path) {
                 target_hash = Some(file_meta.hash);

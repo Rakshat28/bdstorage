@@ -18,7 +18,7 @@ path = "src/main.rs"
 anyhow = "1"
 blake3 = "1"
 bincode = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 colored = "2"
 ctrlc = "3"
 crossbeam = "0.8"
@@ -32,6 +32,7 @@ redb = "2"
 reflink = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+serde_json = "1.0.149"
 [target.'cfg(not(windows))'.dependencies]
 nix = { version = "0.27", features = ["ioctl"] }
 xattr = "1"
@@ -41,3 +42,4 @@ assert_cmd = "2"
 tempfile = "3"
 predicates = "3"
 walkdir = "2"
+serde_json = "1"
