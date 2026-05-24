@@ -224,6 +224,13 @@ Tracked paths    : 342
 Estimated savings: 840.5 MB
 Deduplication ratio: 1.70×
 ```
+### Global flags
+
+| Flag | Meaning |
+|:---|:---|
+| `-q`, `--quiet` | Suppress progress bars and spinners. This is also enabled automatically when stdout is not a terminal, so piped commands stay free of ANSI progress output. |
+
+Progress is drawn on stderr, which keeps stdout clean for scripts and tools that consume `bdstorage` output.
 
 ## Background Daemon (Linux Only)
 
