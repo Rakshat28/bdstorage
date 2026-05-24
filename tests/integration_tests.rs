@@ -709,3 +709,69 @@ fn test_status_with_custom_vault_dir() {
     assert_eq!(json["objects_in_vault"], 1);
     assert_eq!(json["total_vault_size"], 22);
 }
+
+#[test]
+fn test_quiet_suppresses_progress_output() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"hello quiet");
+    create_file_with_content(&target, "file2.txt", b"hello quiet");
+
+    let mut cmd = run_cmd(
+        home,
+        &[
+            "-q",
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("Indexing/Hashing"),
+        "Quiet mode must suppress progress bar"
+    );
+    assert!(
+        !stderr.contains("Scanning..."),
+        "Quiet mode must suppress scanning spinner"
+    );
+}
+
+#[test]
+fn test_nontty_stdout_suppresses_progress_output() {
+    let temp_dir = setup_env();
+    let home = temp_dir.path();
+    let target = home.join("data");
+    fs::create_dir(&target).expect("Failed to create target directory");
+
+    create_file_with_content(&target, "file1.txt", b"hello nontty");
+    create_file_with_content(&target, "file2.txt", b"hello nontty");
+
+    // Standard run in tests is non-TTY by default because stdout/stderr are captured.
+    let mut cmd = run_cmd(
+        home,
+        &[
+            "dedupe",
+            &target.to_string_lossy(),
+            "--allow-unsafe-hardlinks",
+        ],
+    );
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("Indexing/Hashing"),
+        "Non-TTY stdout must suppress progress bar"
+    );
+    assert!(
+        !stderr.contains("Scanning..."),
+        "Non-TTY stdout must suppress scanning spinner"
+    );
+}

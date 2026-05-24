@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::*;
 use crossbeam::channel;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::collections::HashMap;
+use std::io::IsTerminal;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,7 @@ use crate::types::{FileMetadata, Hash, JsonReport, ProcessingError};
     version,
     about = "bdstorage: A speed-first, local file deduplication engine.",
     long_about = "bdstorage uses a Tiered Hashing philosophy to minimize I/O overhead:\n\nSize Grouping: Eliminates unique file sizes immediately.\n\nSparse Hashing: Samples 12KB (start/middle/end) to identify candidates.\n\nFull BLAKE3 Hashing: Verifies matches with high-performance 128KB buffering.",
-    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS (override: --vault-dir or $BDSTORAGE_VAULT):\n  State DB: <vault-dir>/state.redb  (default: ~/.imprint/state.redb)\n  CAS Vault: <vault-dir>/store/     (default: ~/.imprint/store/)\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  --vault-dir <PATH>           Override vault/state directory (env: BDSTORAGE_VAULT)\n  --output-format <text|json>  Set output format (default: text)\n  -h, --help                   Print help\n  -V, --version                Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
+    help_template = "{before-help}{name} {version}\n{author-with-newline}{about-section}\n\nSTORAGE PATHS (override: --vault-dir or $BDSTORAGE_VAULT):\n  State DB: <vault-dir>/state.redb  (default: ~/.imprint/state.redb)\n  CAS Vault: <vault-dir>/store/     (default: ~/.imprint/store/)\n\n{usage-heading} {usage}\n\nGLOBAL FLAGS:\n  --vault-dir <PATH>           Override vault/state directory (env: BDSTORAGE_VAULT)\n  --output-format <text|json>  Set output format (default: text)\n  -q, --quiet                  Suppress all progress output\n  -h, --help                   Print help\n  -V, --version                Print version\n\nSUBCOMMAND FLAGS:\n  --paranoid                 Available on the dedupe subcommand. Forces a byte-for-byte\n                             verification before linking to guarantee 100% collision safety.\n\n  --allow-unsafe-hardlinks   Available on the dedupe subcommand. Allows hard link fallback\n                             when CoW reflinks are not supported. Hard links share the same\n                             inode, so all linked files will have identical metadata.\n\n  -n, --dry-run              Available on dedupe and restore subcommands. Simulates operations\n                             without modifying the filesystem or the database.\n\n{all-args}{after-help}"
 )]
 struct Cli {
     /// Override the vault and state directory.
@@ -38,6 +39,11 @@ struct Cli {
 
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
+
+    /// Suppress all progress output.
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -138,6 +144,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Cli::parse();
+    let quiet = args.quiet || !std::io::stdout().is_terminal();
+    hasher::set_quiet(quiet);
+
     let vault_dir = resolve_vault_dir(args.vault_dir.as_deref())?;
     let mut report = JsonReport::default();
 
@@ -292,8 +301,9 @@ fn scan_pipeline(
     report: &mut JsonReport,
 ) -> Result<HashMap<Hash, Vec<PathBuf>>> {
     let is_json = format == OutputFormat::Json;
-    let multi = MultiProgress::new();
-    let scan_spinner = if is_json {
+    let quiet = is_json || hasher::is_quiet();
+    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
+    let scan_spinner = if quiet {
         ProgressBar::hidden()
     } else {
         multi.add(ProgressBar::new_spinner())
@@ -305,10 +315,10 @@ fn scan_pipeline(
     );
     scan_spinner.set_message("Scanning...");
 
-    let hash_bar = if is_json {
+    let hash_bar = if quiet {
         ProgressBar::hidden()
     } else {
-        multi.add(progress("Indexing/Hashing", 0))
+        multi.add(byte_progress("Indexing/Hashing", 0))
     };
 
     let (scan_tx, scan_rx) = channel::unbounded();
@@ -343,7 +353,7 @@ fn scan_pipeline(
 
                     let size = metadata.len();
                     match hasher::sparse_hash(&file_path, size) {
-                        Ok(_) => match hasher::full_hash(&file_path) {
+                        Ok(_) => match hasher::full_hash(&file_path, Some(&hash_bar_clone)) {
                             Ok(full_hash) => {
                                 let modified = file_modified(&file_path).unwrap_or(0);
                                 let file_metadata = FileMetadata {
@@ -354,7 +364,6 @@ fn scan_pipeline(
                                 let _ = db_ops_tx
                                     .send(DbOp::UpsertFile(file_path.clone(), file_metadata));
                                 let _ = tx.send(Ok((full_hash, file_path)));
-                                hash_bar_clone.inc(1);
                             }
                             Err(e) => {
                                 let _ = tx.send(Err((file_path, format!("Full hash failed: {e}"))));
@@ -392,13 +401,16 @@ fn scan_pipeline(
 
                     if len_before == 1 {
                         if let Some(first_file) = entry.first().cloned() {
+                            let first_size =
+                                std::fs::metadata(&first_file).map(|m| m.len()).unwrap_or(0);
+                            hash_bar.set_length(hash_bar.length().unwrap_or(0) + first_size);
                             let _ = hash_task_tx.send(first_file);
                         }
+                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + size);
                         let _ = hash_task_tx.send(file_path);
-                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 2);
                     } else if len_before > 1 {
+                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + size);
                         let _ = hash_task_tx.send(file_path);
-                        hash_bar.set_length(hash_bar.length().unwrap_or(0) + 1);
                     }
                 }
             }
@@ -829,12 +841,14 @@ fn file_modified(path: &Path) -> Result<u64> {
     Ok(duration.as_secs())
 }
 
-fn progress(label: &str, total: u64) -> ProgressBar {
-    let bar = ProgressBar::new(total);
+fn byte_progress(label: &str, total: u64) -> ProgressBar {
+    let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
     bar.set_style(
-        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len}")
-            .unwrap()
-            .progress_chars("##-"),
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
+        )
+        .unwrap()
+        .progress_chars("##-"),
     );
     bar.set_message(label.to_string());
     bar
@@ -933,8 +947,13 @@ fn restore_pipeline(
     dry_run: bool,
     vault_dir: &Path,
 ) -> Result<()> {
-    let multi = MultiProgress::new();
-    let restore_spinner = multi.add(ProgressBar::new_spinner());
+    let quiet = hasher::is_quiet();
+    let multi = MultiProgress::with_draw_target(ProgressDrawTarget::stderr());
+    let restore_spinner = if quiet {
+        ProgressBar::hidden()
+    } else {
+        multi.add(ProgressBar::new_spinner())
+    };
     restore_spinner.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner} {msg}")

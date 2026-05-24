@@ -3,14 +3,25 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SPARSE_CHUNK: usize = 4 * 1024;
 const SPARSE_TOTAL: u64 = 12 * 1024;
 const FULL_BUF: usize = 128 * 1024;
 
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
+
 pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
     if size <= SPARSE_TOTAL {
-        return full_hash(path);
+        return full_hash(path, None);
     }
 
     let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
@@ -33,7 +44,7 @@ pub fn sparse_hash(path: &Path, size: u64) -> Result<Hash> {
     Ok(hasher.finalize().into())
 }
 
-pub fn full_hash(path: &Path) -> Result<Hash> {
+pub fn full_hash(path: &Path, pb: Option<&indicatif::ProgressBar>) -> Result<Hash> {
     let mut file = File::open(path).with_context(|| format!("open file {:?}", path))?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; FULL_BUF];
@@ -44,6 +55,9 @@ pub fn full_hash(path: &Path) -> Result<Hash> {
             break;
         }
         hasher.update(&buffer[..read]);
+        if let Some(bar) = pb {
+            bar.inc(read as u64);
+        }
     }
 
     Ok(hasher.finalize().into())
