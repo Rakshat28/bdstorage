@@ -203,6 +203,8 @@ bdstorage restore /path/to/directory
 |:---|:---|
 | `-n`, `--dry-run` | Show what would be restored without writing. |
 
+> **Verification:** After running `restore`, verify that restored files are no longer linked by checking their link count with `ls -l`. Restored files should have a link count of `1`, indicating they are independent copies.
+
 When a vault object’s refcount hits zero during restore, it is **removed** (garbage collection).
 
 **Status** (passive vault inspection):
