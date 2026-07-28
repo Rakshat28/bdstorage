@@ -36,7 +36,14 @@ serde_json = "1.0.149"
 [target.'cfg(not(windows))'.dependencies]
 nix = { version = "0.27", features = ["ioctl"] }
 xattr = "1"
+libsystemd = "0.7"
+tokio-stream = "0.1"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
+[dependencies.tokio]
+version = "1.35"
+features = ["full"]
 [dev-dependencies]
 assert_cmd = "2"
 tempfile = "3"
