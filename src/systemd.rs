@@ -122,3 +122,13 @@ fn escape_for_systemd(arg: &str) -> String {
         .replace('$', "$$");
     format!("\"{escaped}\"")
 }
+
+pub fn notify_ready() -> Result<()> {
+    // notify systemd that the daemon is ready
+    let state = [(libsystemd::daemon::STATE_READY, "1")];
+    if libsystemd::daemon::booted() {
+        libsystemd::daemon::notify(false, &state)
+            .context("failed to notify systemd")?;
+    }
+    Ok(())
+}

@@ -245,8 +245,94 @@ fn run_dedupe_once(
     )
 }
 
+#[cfg(not(windows))]
 fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: &Path) -> Result<()> {
-    let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(1);
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        use signal_hook::consts::signal::*;
+        use signal_hook_tokio::Signals;
+        use tokio_stream::StreamExt;
+        
+        let mut signals = Signals::new(&[SIGHUP, SIGTERM, SIGINT])?;
+        let handle = signals.handle();
+        
+        println!(
+            "[daemon] started; target={} interval_secs={interval_secs}",
+            opts.path.display()
+        );
+
+        let socket_path = "/tmp/bdstorage.sock";
+        let _ = std::fs::remove_file(socket_path);
+        let listener = tokio::net::UnixListener::bind(socket_path)?;
+        
+        if let Err(e) = crate::systemd::notify_ready() {
+            eprintln!("[daemon] warning: failed to notify systemd: {e}");
+        }
+        
+        let mut run_no: u64 = 1;
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    println!("[daemon] run #{run_no} started");
+                    let started = std::time::Instant::now();
+                    // Run dedupe in a blocking thread since it is CPU/IO heavy
+                    let opts_clone = opts.clone();
+                    let vault_dir_clone = vault_dir.to_path_buf();
+                    let summary_res = tokio::task::spawn_blocking(move || {
+                        let mut daemon_report = JsonReport::default();
+                        run_dedupe_once(&opts_clone, &vault_dir_clone, OutputFormat::Text, &mut daemon_report)
+                    }).await?;
+                    
+                    match summary_res {
+                        Ok(summary) => {
+                            println!(
+                                "[daemon] run #{run_no} complete in {:.2}s; duplicate_groups={} files_linked={}",
+                                started.elapsed().as_secs_f64(),
+                                summary.duplicate_groups,
+                                summary.files_linked,
+                            );
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[daemon] run #{run_no} failed in {:.2}s: {err:#}",
+                                started.elapsed().as_secs_f64()
+                            );
+                        }
+                    }
+                    run_no += 1;
+                }
+                Ok((mut _socket, _addr)) = listener.accept() => {
+                    println!("[daemon] IPC command received");
+                    // Implement further IPC handling here
+                }
+                Some(signal) = signals.next() => {
+                    match signal {
+                        SIGHUP => {
+                            println!("[daemon] SIGHUP received, reloading config (no-op for now)");
+                        }
+                        SIGTERM | SIGINT => {
+                            println!("[daemon] shutdown signal received");
+                            break;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        
+        handle.close();
+        let _ = std::fs::remove_file(socket_path);
+        println!("[daemon] stopped");
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: &Path) -> Result<()> {
+    let (shutdown_tx, shutdown_rx) = crossbeam::channel::bounded::<()>(1);
     ctrlc::set_handler(move || {
         let _ = shutdown_tx.try_send(());
     })
@@ -285,8 +371,8 @@ fn run_daemon(opts: DedupeOptions, interval_secs: u64, vault_dir: &Path) -> Resu
         run_no += 1;
 
         match shutdown_rx.recv_timeout(Duration::from_secs(interval_secs)) {
-            Ok(_) | Err(channel::RecvTimeoutError::Disconnected) => break,
-            Err(channel::RecvTimeoutError::Timeout) => {}
+            Ok(_) | Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
         }
     }
 
