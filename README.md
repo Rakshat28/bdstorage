@@ -358,3 +358,29 @@ We take your data seriously. `bdstorage` is designed with the following invarian
 ## License
 
 This project is open-source and distributed under the **Apache License 2.0**.
+
+## Troubleshooting
+
+### Installation fails
+- Ensure you are using the supported Node.js version.
+- Run `npm install` or `npm ci`.
+- Delete `node_modules` and reinstall dependencies if necessary.
+
+### Environment variables not loading
+- Verify that a `.env` file exists.
+- Ensure all required variables are defined.
+- Restart the development server after making changes.
+
+## FAQ
+
+### How do I start the project?
+Run:
+
+```bash
+npm install
+npm run dev
+```
+
+### How do I report a bug?
+Please open a GitHub issue with reproduction steps and relevant logs.
+
